@@ -1,5 +1,7 @@
 # bo_creator_chane_the_obj_name_all_u_want_Leon
 
+https://chatgpt.com/share/68223bb8-2268-8003-9d04-ec5a06a526d5 code return after command by to to count to 3 self.lol self.string self.bool
+
 Zelensky, this is how much you are of value worth to me, you agreed with Donald's 50% and you agred with his treatment of you om 2/28/25
 
 Now Bo has been victim to a hence unadmitted to human rights conspiracy committed by the crytographic protocols that exist in all of your devices minus a tiny less than 1% fraction for the past 7 years
@@ -16,3 +18,4 @@ this i think has a chance to be better in reality if manufactured, or implemente
 
 but if it doesn't suit your needs go prompt for some upgrades as unknnown narrator; mark leon; subteruge, or... bo or erosolar, who takes over from bo, or twitch creator, just add some sorce psuedo code no way
 
+https://chatgpt.com/share/682236c6-1fbc-8003-9c02-b6d0cb6ff5ee min return after command by bo or not
