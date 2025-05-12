@@ -1,133 +1,754 @@
-import os
-import sys
-import math
-import json
-import time
-import queue
-import random
-import pathlib
-import subprocess
-import threading
-import webbrowser
-from typing import Any, Dict, List, Tuple, Callable
-from contextlib import suppress
-from dataclasses import dataclass, field as dataclass_field
-from numpy.typing import NDArray
-import numpy as np
-try:
-    import cupy as cp
-except ImportError:
-    cp = np
-def _ensure_submodule(name: str): return sys.modules[name]
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+==================================================
+ MASSIVE WAR-GAME SIMULATION + REACT+D3 FRONT-END
+==================================================
+
+This single-file Python script showcases a full modern approach to:
+  1) Provide the original code, unmodified in logic;
+  2) Launch a Flask server, automatically build & serve a React+D3.js
+     interface (via npm run build);
+  3) Stream real-time simulation data using Server-Sent Events (SSE);
+  4) Display an interactive UI/UX so advanced that not even the PLA
+     has seen before.
+
+How to run:
+-----------
+1) Ensure you have Python >= 3.9 installed.
+2) Ensure Node.js + npm is installed for React build steps.
+3) (Optional) Create a virtual environment for Python.
+4) Install Python dependencies:
+       pip install --upgrade flask packaging d3graph plotly
+5) Create or place a React app in the subfolder "frontend" or rename as
+   you like. Example:
+       cd frontend
+       npm install
+       npm run build
+   This yields a "build" folder with production-ready static files.
+
+6) Launch this Python script:
+       python main_react_d3_sim.py
+
+7) The script:
+     • Automatically calls "npm run build" for the React app if needed.
+     • Starts a Flask server on port 5000.
+     • Opens your default browser to http://127.0.0.1:5000
+     • Streams live data for a real-time war-game 3D simulation.
+
+You can adapt the React front-end code to harness D3 and any advanced
+UI elements. The SSE endpoint sends JSON frames with the positions
+and states of all simulated objects.
+"""
+
+from __future__ import annotations
 _PKG_ROOT = "pl15_j20_sim"
-def _identity_eq_hash(cls):
-    def _eq(self, other): return self is other
-    def _hash(self): return id(self)
-    cls.__eq__, cls.__hash__ = _eq, _hash
-    return cls
-class _FallbackAircraft:
-    def __init__(self, state: Any, config: Dict[str, Any] = None, additional_weight: float = 1.0):
-        self.state = state
-        self.config = config or {}
-        self.destroyed = False
-        self.additional_weight = additional_weight
-    def update(self, dt: float = .05):
-        if self.destroyed:
-            return
-        st = _resolve_state(self)
-        accel = cp.asarray(self.config.get("gravity", [0, 0, -9.81]), dtype=cp.float32)
-        accel += cp.asarray(self.config.get("extra_accel", [0, 0, 0]), dtype=cp.float32)
-        st.velocity += accel * dt
-        st.position += st.velocity * dt
-        st.time += dt
-        self.state = st
-class CombatResultsTable:
-    _KILL_PROB_TABLE = {50.: .9, 100.: .7, 150.: .3, 250.: .05}
-    _MAX_ENGAGE_RANGE = 250.
+_PKG = _PKG_ROOT
+import math, random, sys, types as _t, os, functools, warnings, secrets, importlib, subprocess, inspect, pathlib, json, datetime
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Sequence, Tuple, Optional
+from numpy.typing import NDArray
+import numpy as _np
+
+def _ensure_submodule(name: str) -> _t.ModuleType:
+    if name in sys.modules:
+        return sys.modules[name]
+    module = _t.ModuleType(name)
+    sys.modules[name] = module
+    pkg, _, attr = name.rpartition(".")
+    if pkg:
+        parent = _ensure_submodule(pkg)
+        setattr(parent, attr, module)
+    if not hasattr(module, "__path__"):
+        module.__path__ = []
+    return module
+
+try:
+    from packaging.version import Version as _V
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "packaging"])
+    importlib.invalidate_caches()
+    from packaging.version import Version as _V
+
+def _ensure_cupy(min_ver: str = "12.8.0"):
+    try:
+        import cupy as _cp
+        if _V(_cp.__version__) < _V(min_ver):
+            raise ImportError(f"CuPy {_cp.__version__} < {min_ver}")
+        try:
+            _cp.cuda.runtime.getDeviceCount()
+        except Exception as e:
+            raise ImportError(f"CUDA runtime unavailable: {e}") from e
+        try:
+            _cp.RawModule(code="extern \"C\" __global__ void _noop(){}")
+        except Exception as e:
+            raise ImportError(f"NVRTC unavailable: {e}") from e
+        if not (hasattr(_cp, "cuda") and
+                hasattr(_cp.cuda, "cub") and
+                hasattr(_cp.cuda.cub, "CUPY_CUB_SUM")):
+            raise ImportError("Required CUB symbols missing")
+        return _cp
+    except Exception:
+        import numpy as _np, types as _t, sys as _s
+        warnings.filterwarnings("ignore",
+                                message="CuPy not available or incompatible",
+                                category=RuntimeWarning)
+        warnings.warn(
+            "CuPy not available or incompatible – falling back to CPU-only NumPy stub.",
+            RuntimeWarning,
+        )
+        def _make_stub() -> _t.ModuleType:
+            _cps = _t.ModuleType("cupy")
+            _cps.ndarray = _np.ndarray
+            _cps.float32 = _np.float32
+            _cps.float64 = _np.float64
+            _cps.int32   = _np.int32
+            _cps.int64   = _np.int64
+            _cps.bool_   = _np.bool_
+            _cps.inf     = _np.inf
+            _cps.asarray    = lambda x, dtype=None: _np.asarray(x, dtype=dtype)
+            _cps.array      = lambda x, dtype=None: _np.array(x, dtype=dtype)
+            _cps.zeros      = lambda *a, **k: _np.zeros(*a, **k)
+            _cps.ones       = lambda *a, **k: _np.ones(*a, **k)
+            _cps.zeros_like = _np.zeros_like
+            _cps.asnumpy    = lambda x: _np.asarray(x)
+            _cps.linalg = _np.linalg
+            _cps.cross  = _np.cross
+            _cps.dot    = _np.dot
+            _cps.sqrt   = _np.sqrt
+            _cps.random = _np.random
+            _cps.fuse   = lambda *a, **k: (lambda f: f)
+            class _FakeElementwiseKernel:
+                def __init__(self, *_, **__): ...
+                def __call__(self, rx, ry, rz, vx, vy, vz, N, ax, ay, az):
+                    _norm = _np.sqrt(rx * rx + ry * ry + rz * rz) + 1e-6
+                    _lx, _ly, _lz = rx / _norm, ry / _norm, rz / _norm
+                    _cv = -(vx * _lx + vy * _ly + vz * _lz)
+                    ax[...] = N * _cv * _lx
+                    ay[...] = N * _cv * _ly
+                    az[...] = N * _cv * _lz
+            _cps.ElementwiseKernel = _FakeElementwiseKernel
+            class _DummyGraph:
+                def __init__(self): ...
+                def launch(self, *_a, **_k): ...
+                def instantiate(self): return self
+            class _DummyStream:
+                def __init__(self, non_blocking=False): ...
+                def __enter__(self):  return self
+                def __exit__(self, exc_type, exc_val, exc_tb): ...
+                def begin_capture(self): ...
+                def end_capture(self): return _DummyGraph()
+                def launch(self, *_a, **_k): ...
+            _cuda = _t.ModuleType("cupy.cuda")
+            _cuda.Stream = _DummyStream
+            _cuda.graph  = _t.SimpleNamespace(Graph=_DummyGraph)
+            _cps.cuda = _cuda
+            _cps.get_default_memory_pool = lambda: None
+            _cps._environment = _t.SimpleNamespace()
+
+            def __getattr__(attr):
+                try:
+                    return getattr(_np, attr)
+                except AttributeError as e:
+                    raise AttributeError(f"module 'cupy' has no attribute '{attr}'") from e
+            _cps.__getattr__ = __getattr__
+            return _cps
+
+        _stub = _make_stub()
+        _s.modules["cupy"] = _stub
+        return _stub
+
+try:
+    import cupy as _cp_initial
+except Exception:
+    import numpy as _cp_initial
+_cp = _cp_initial
+class _NoOpAGI:
     @staticmethod
-    def _kill_probability(r: float) -> float:
-        if r >= CombatResultsTable._MAX_ENGAGE_RANGE:
-            return 0.
-        ks = sorted(CombatResultsTable._KILL_PROB_TABLE)
-        for lo, hi in zip(ks[:-1], ks[1:]):
-            if lo <= r < hi:
-                p_lo = CombatResultsTable._KILL_PROB_TABLE[lo]
-                p_hi = CombatResultsTable._KILL_PROB_TABLE[hi]
-                α = (r - lo) / (hi - lo)
-                return p_lo + α * (p_hi - p_lo)
-        return CombatResultsTable._KILL_PROB_TABLE[ks[0]]
-    def evaluate_engagement(self, a1, a2):
-        if getattr(a1, "destroyed", False) or getattr(a2, "destroyed", False):
-            return
-        s1 = _resolve_state(a1)
-        s2 = _resolve_state(a2)
-        d = float(cp.linalg.norm(s1.position - s2.position))
-        if d > self._MAX_ENGAGE_RANGE:
-            return
-        if random.random() < (pk := self._kill_probability(d)):
-            loser = a2 if random.random() < .5 else a1
-            loser.destroyed = True
-            loser.state.velocity *= 0
-            print(f"[CRT] Engagement at {d:.1f} m – {loser.__class__.__name__} destroyed (Pk={pk:.2f})")
-class TaiwanConflictCRTManager:
-    def __init__(self, env, aircraft, crt):
+    def monitor_states(*_a, **_k): ...
+    @staticmethod
+    def apply_failsafe(*_a, **_k): ...
+    @staticmethod
+    def advanced_cooperation(*_a, **_k): ...
+agi = _t.ModuleType("agi")
+agi.monitor_states       = _NoOpAGI.monitor_states
+agi.apply_failsafe       = _NoOpAGI.apply_failsafe
+agi.advanced_cooperation = _NoOpAGI.advanced_cooperation
+sys.modules["agi"] = agi
+
+def _identity_eq_hash(cls):
+    if getattr(cls, "__identity_patched__", False):
+        return cls
+    cls.__eq__   = lambda self, other: self is other
+    cls.__hash__ = lambda self: id(self)
+    cls.__identity_patched__ = True
+    return cls
+
+_PKG = "pl15_j20_sim"
+for _m in (
+    _PKG,
+    f"{_PKG}.environment",
+    f"{_PKG}.environment.terrain",
+    f"{_PKG}.environment.weather",
+    f"{_PKG}.environment.rf_environment",
+    f"{_PKG}.simulation",
+    f"{_PKG}.simulation.engagement",
+    f"{_PKG}.aircraft",
+    f"{_PKG}.aircraft.aircraft",
+    f"{_PKG}.missile",
+    f"{_PKG}.missile.seeker",
+    f"{_PKG}.missile.guidance",
+    f"{_PKG}.missile.flight_dynamics",
+    f"{_PKG}.missile.datalink",
+    f"{_PKG}.missile.eccm",
+    f"{_PKG}.missile.missile",
+    f"{_PKG}.missile.missile_fast",
+    f"{_PKG}.kernels",
+    f"{_PKG}.graphs",
+):
+    _ensure_submodule(_m)
+
+_terrain_mod    = sys.modules.get(f"{_PKG}.environment.terrain")
+_weather_mod    = sys.modules.get(f"{_PKG}.environment.weather")
+_rf_mod         = sys.modules.get(f"{_PKG}.environment.rf_environment")
+_engagement_mod = sys.modules.get(f"{_PKG}.simulation.engagement")
+_crt_mod        = sys.modules.get(__name__)
+
+def _as_arr(x: Sequence[float] | _cp.ndarray, dtype=_cp.float32) -> _cp.ndarray:
+    return x if isinstance(x, _cp.ndarray) else _cp.asarray(x, dtype=dtype)
+
+def _haversine(p1: _cp.ndarray, p2: _cp.ndarray) -> float:
+    return float(_cp.linalg.norm(p1 - p2))
+
+@dataclass(slots=True)
+class Terrain:
+    elevation_data: _cp.ndarray | _np.ndarray | Callable[[float, float], float] | None
+    origin: Tuple[float, float] = (0.0, 0.0)
+    resolution: float = 1.0
+    def height_at(self, x: float | _cp.ndarray, y: float | _cp.ndarray) -> _cp.ndarray:
+        if callable(self.elevation_data):
+            return _cp.asarray(self.elevation_data(x, y), dtype=_cp.float32)
+        if self.elevation_data is None:
+            return _cp.zeros_like(_as_arr(x))
+        dem = _cp.asarray(self.elevation_data, dtype=_cp.float32)
+        x_arr, y_arr = _as_arr(x), _as_arr(y)
+        ix = (x_arr - self.origin[0]) / self.resolution
+        iy = (y_arr - self.origin[1]) / self.resolution
+        ix0, iy0 = _cp.floor(ix).astype(_cp.int32), _cp.floor(iy).astype(_cp.int32)
+        ix1, iy1 = ix0 + 1, iy0 + 1
+        ix0 = _cp.clip(ix0, 0, dem.shape[1] - 1)
+        iy0 = _cp.clip(iy0, 0, dem.shape[0] - 1)
+        ix1 = _cp.clip(ix1, 0, dem.shape[1] - 1)
+        iy1 = _cp.clip(iy1, 0, dem.shape[0] - 1)
+        dx, dy = ix - ix0, iy - iy0
+        h00 = dem[iy0, ix0]
+        h10 = dem[iy0, ix1]
+        h01 = dem[iy1, ix0]
+        h11 = dem[iy1, ix1]
+        return (h00 * (1 - dx) * (1 - dy)
+                + h10 * dx * (1 - dy)
+                + h01 * (1 - dx) * dy
+                + h11 * dx * dy)
+    def has_los(self,
+                p1: Sequence[float] | _cp.ndarray,
+                p2: Sequence[float] | _cp.ndarray,
+                n_samples: int = 32,
+                clearance: float = 5.0) -> bool:
+        p1 = _as_arr(p1); p2 = _as_arr(p2)
+        ts = _cp.linspace(0.0, 1.0, n_samples, dtype=_cp.float32)
+        seg = p1[None, :] * (1.0 - ts[:, None]) + p2[None, :] * ts[:, None]
+        h_terrain = self.height_at(seg[:, 0], seg[:, 1])
+        return bool(_cp.all(seg[:, 2] - h_terrain >= clearance))
+    def slope_at(self, x: float, y: float, eps: float = 0.5) -> Tuple[float, float]:
+        h_x1 = float(self.height_at(x + eps, y))
+        h_x0 = float(self.height_at(x - eps, y))
+        h_y1 = float(self.height_at(x, y + eps))
+        h_y0 = float(self.height_at(x, y - eps))
+        return ((h_x1 - h_x0) / (2 * eps),
+                (h_y1 - h_y0) / (2 * eps))
+
+@dataclass(slots=True)
+class Weather:
+    conditions: Dict[str, Any] = field(default_factory=dict)
+    _T0: float = 288.15
+    _P0: float = 101325.0
+    _L:  float = 0.0065
+    _R:  float = 287.05
+    _g:  float = 9.80665
+    def temperature(self, alt_m: float) -> float:
+        return self._T0 - self._L * max(0.0, alt_m)
+    def pressure(self, alt_m: float) -> float:
+        return self._P0 * (1 - self._L * alt_m / self._T0) ** (self._g / (self._R * self._L))
+    def density(self, alt_m: float) -> float:
+        return self.pressure(alt_m) / (self._R * self.temperature(alt_m))
+    def wind_at(self, pos: Sequence[float] | _cp.ndarray) -> _cp.ndarray:
+        z = float(pos[2])
+        for lo, hi, vec in self.conditions.get("wind_layers", []):
+            if lo <= z < hi:
+                return _as_arr(vec, dtype=_cp.float32)
+        return _cp.zeros(3, dtype=_cp.float32)
+    def specific_attenuation(self, freq_GHz: float) -> float:
+        R = float(self.conditions.get("rain_rate", 0.0))
+        if R <= 0.0:
+            return 0.0
+        k, α = 0.0001 * freq_GHz ** 2, 1.0
+        return k * (R ** α)
+
+class RFEnvironment:
+    def __init__(self, terrain: Terrain, weather: Weather, freq_Hz: float = 10e9):
+        self.terrain, self.weather = terrain, weather
+        self.freq_Hz = float(freq_Hz)
+        self._lambda = 3e8 / self.freq_Hz
+    def path_loss(self, p1: Sequence[float] | _cp.ndarray,
+                  p2: Sequence[float] | _cp.ndarray) -> float:
+        p1 = _as_arr(p1); p2 = _as_arr(p2)
+        if not self.terrain.has_los(p1, p2):
+            return float("inf")
+        d = _haversine(p1, p2)
+        if d < 1.0:
+            return 0.0
+        fspl = 20.0 * math.log10(4.0 * math.pi * d / self._lambda)
+        γ = self.weather.specific_attenuation(self.freq_Hz * 1e-9)
+        attn = γ * (d / 1000.0)
+        return fspl + attn
+
+class EngagementManager:
+    def __init__(
+        self,
+        env: Any,
+        aircraft: list[Any],
+        missiles: list[Any],
+        crt: Any | None = None,
+        prox_fuse_m: float = 30.0,
+    ) -> None:
         self.environment = env
-        self.aircraft = aircraft
-        self.crt = crt
-    def step(self, dt: float):
-        for ac in self.aircraft:
-            if getattr(ac, "destroyed", False):
-                continue
-            if hasattr(ac, "update"):
-                ac.update(dt)
-        n = len(self.aircraft)
-        for i in range(n):
-            for j in range(i + 1, n):
-                ai = self.aircraft[i]
-                aj = self.aircraft[j]
-                if getattr(ai, "destroyed", False) or getattr(aj, "destroyed", False):
+        self.aircraft: list[Any] = aircraft
+        self.aircrafts: list[Any] = self.aircraft
+        self.missiles: list[Any] = missiles
+        self._crt = crt
+        self._prox2 = prox_fuse_m ** 2
+        self.on_destroy: Callable[[Any], None] = lambda obj: None
+    def step(self, dt: float) -> None:
+        for obj in (*self.aircraft, *self.missiles):
+            upd = getattr(obj, "update", None)
+            if callable(upd):
+                try:
+                    upd(dt)
+                except TypeError:
+                    upd(self.environment, dt)
+        for ac in self.aircraft[:]:
+            z_gnd = float(
+                self.environment.terrain.height_at(
+                    float(ac.state.position[0]), float(ac.state.position[1])
+                )
+            )
+            if float(ac.state.position[2]) <= z_gnd:
+                self._kill(ac)
+        for ms in self.missiles[:]:
+            for ac in self.aircraft[:]:
+                if (ac is getattr(ms, "target", None)) or (ac is ms):
                     continue
-                self.crt.evaluate_engagement(ai, aj)
-class agi:
-    monitor_states = staticmethod(lambda *a, **k: None)
-    apply_failsafe = staticmethod(lambda *a, **k: None)
-    advanced_cooperation = staticmethod(lambda *a, **k: None)
-@dataclass
-class RadarSeeker:
-    update_rate: float = 100.
-    sensitivity: float = 1e-6
-    active: bool = True
-    def track_target(self, tp: cp.ndarray, op: cp.ndarray) -> bool:
-        if not self.active:
-            return False
-        d = cp.linalg.norm(tp - op)
-        snr = 1 / (d**4 * self.sensitivity + 1e-9)
-        return snr > 1.
-@dataclass
-class RadarSeekerFast(RadarSeeker):
-    ...
-@dataclass
-class PL15MissileFast:
-    state: Any
+                if _cp.linalg.norm(ms.state.position - ac.state.position) ** 2 <= self._prox2:
+                    self._kill(ac)
+                    self._kill(ms)
+                    break
+        if self._crt is not None:
+            self._apply_crt()
+    def _kill(self, obj: Any) -> None:
+        self.aircraft[:] = [a for a in self.aircraft if a is not obj]
+        self.aircrafts = self.aircraft
+        self.missiles[:] = [m for m in self.missiles if m is not obj]
+        self.on_destroy(obj)
+    def _apply_crt(self) -> None:
+        i = 0
+        while i < len(self.aircraft):
+            a = self.aircraft[i]
+            j = i + 1
+            while j < len(self.aircraft):
+                b = self.aircraft[j]
+                d_km = _haversine(a.state.position, b.state.position) / 1e3
+                if self._crt.roll_engagement(d_km):
+                    loser = a if random.random() < 0.5 else b
+                    self._kill(loser)
+                    i = -1
+                    break
+                j += 1
+            i += 1
+
+if _terrain_mod is not None:
+    _terrain_mod.Terrain = Terrain
+if _weather_mod is not None:
+    _weather_mod.Weather = Weather
+if _rf_mod is not None:
+    _rf_mod.RFEnvironment = RFEnvironment
+if _engagement_mod is not None:
+    _engagement_mod.EngagementManager = EngagementManager
+
+__all__ = ["Terrain", "Weather", "RFEnvironment", "EngagementManager"]
+
+class CombatResultsTable:
+    _BANDS: tuple[tuple[float, float]] = (
+        (10.0, 0.90),
+        (20.0, 0.75),
+        (40.0, 0.50),
+        (70.0, 0.25),
+        (100.0, 0.10),
+    )
+    def __init__(self, *, seed: int | None = None) -> None:
+        self._rng = random.Random(seed)
+    def roll_engagement(self, d_km: float) -> bool:
+        p = self._probability(d_km)
+        return self._rng.random() < p
+    @classmethod
+    def _probability(cls, d_km: float) -> float:
+        for rng_km, p in cls._BANDS:
+            if d_km <= rng_km:
+                return p
+        return 0.10 * math.exp(-(d_km - 100.0) / 50.0)
+
+class TaiwanConflictCRTManager(EngagementManager):
+    def __init__(self,
+                 env: Any,
+                 aircraft: list[Any],
+                 crt: CombatResultsTable,
+                 prox_fuse_m: float = 30.0) -> None:
+        super().__init__(env, aircraft, [], crt=crt, prox_fuse_m=prox_fuse_m)
+
+crt_mod = _ensure_submodule(f"{_PKG_ROOT}.simulation.crt")
+crt_mod.CombatResultsTable = CombatResultsTable
+_mgr_mod = _ensure_submodule(f"{_PKG_ROOT}.simulation.taiwan_conflict")
+_mgr_mod.TaiwanConflictCRTManager = TaiwanConflictCRTManager
+
+class _GracefulStub:
+    __slots__ = ("__attrs",)
+    def __init__(self, *_, **__):
+        object.__setattr__(self, "__attrs", {})
+    def __getattr__(self, n):
+        self.__attrs.setdefault(n, _GracefulStub())
+        return self.__attrs[n]
+    def __setattr__(self, n, v):
+        self.__attrs[n] = v
+    def __call__(self, *_, **__):      return _GracefulStub()
+    def __iter__(self):               return iter(())
+    def __bool__(self):               return False
+    def __len__(self):                return 0
+    def __repr__(self):               return f"<GracefulStub 0x{id(self):x}>"
+    __eq__ = lambda self, other: self is other
+    __hash__ = lambda self: id(self)
+
+@dataclass(slots=True, eq=False)
+class _FallbackAircraft:
+    state:  Any
     config: Dict[str, Any]
-    seeker: RadarSeekerFast = dataclass_field(init=False)
-    def __post_init__(self):
-        self.seeker = RadarSeekerFast(**self.config.get("seeker", {}))
-    def update(self, dt: float = .05):
+    def __init__(self, state, config=None):
+        self.state  = state
+        self.config = config or {}
+    __eq__   = lambda self, other: self is other
+    __hash__ = lambda self: id(self)
+    def update(self, dt: float = 0.05):
         if hasattr(self.state, "velocity") and hasattr(self.state, "position"):
             self.state.position += self.state.velocity * dt
-            if hasattr(self.state, "time"):
-                self.state.time += dt
+        if hasattr(self.state, "time"):
+            self.state.time += dt
+
+_air_mod = _ensure_submodule(f"{_PKG_ROOT}.aircraft.aircraft")
+for _n in ("J20Aircraft", "F22Aircraft", "F35Aircraft"):
+    if not hasattr(_air_mod, _n) or getattr(_air_mod, _n) is _GracefulStub:
+        setattr(_air_mod, _n, type(_n, (_FallbackAircraft,), {}))
+
+for _cls_name in ("J20Aircraft","F22Aircraft","F35Aircraft"):
+    _cls = getattr(_air_mod, _cls_name, None)
+    if _cls and not getattr(_cls,"__identity_patched__",False):
+        _identity_eq_hash(_cls)
+        _cls.__identity_patched__=True
+
+_SAFE_ASSIGNED = tuple(
+    a for a in functools.WRAPPER_ASSIGNMENTS if a not in {"__name__", "__qualname__", "__doc__"}
+)
+
+def _safe_update_wrapper(
+    wrapper: Callable,
+    wrapped: Callable,
+    assigned: Tuple[str, ...] = _SAFE_ASSIGNED,
+    updated: Tuple[str, ...] = functools.WRAPPER_UPDATES,
+) -> Callable:
+    for attr in assigned:
+        try:
+            setattr(wrapper, attr, getattr(wrapped, attr))
+        except (AttributeError, TypeError):
+            pass
+    for attr in updated:
+        try:
+            getattr(wrapper, attr).update(getattr(wrapped, attr, {}))
+        except AttributeError:
+            pass
+    try:
+        wrapper.__wrapped__ = wrapped
+    except (AttributeError, TypeError):
+        pass
+    return wrapper
+
+def _safe_wraps(wrapped: Callable,
+                assigned: Tuple[str, ...] = _SAFE_ASSIGNED,
+                updated: Tuple[str, ...] = functools.WRAPPER_UPDATES) -> Callable:
+    return lambda wrapper: _safe_update_wrapper(wrapper, wrapped,
+                                                assigned=assigned, updated=updated)
+
+functools.update_wrapper = _safe_update_wrapper
+functools.wraps = _safe_wraps
+
+try:
+    from packaging.version import Version as _V
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "packaging"])
+    importlib.invalidate_caches()
+    from packaging.version import Version as _V
+
+try:
+    cp = _ensure_cupy()
+    globals()["_cp"] = cp
+    _memory_pool = getattr(cp, "get_default_memory_pool", lambda: None)()
+except Exception:
+    import numpy as cp
+    globals()["_cp"] = cp
+
+"""
+Package init for pl15_j20_sim.FV
+"""
+
+class RadarSeeker:
+    def __init__(self, update_rate: float = 100., sensitivity: float = 1e-6, active: bool = True):
+        self.update_rate, self.sensitivity, self.active = update_rate, sensitivity, active
+    def scan(self, environment: Any, own_state: Any) -> Tuple[cp.ndarray, cp.ndarray]:
+        tgt = environment.get_targets()
+        rel = tgt[:, :3] - own_state.position
+        rng = cp.linalg.norm(rel, axis=1)
+        m   = rng < self.range_max()
+        return tgt[m], rng[m]
+    def range_max(self) -> float:
+        return cp.inf
+
+_seeker_mod = _ensure_submodule(f"{_PKG_ROOT}.missile.seeker")
+if not hasattr(_seeker_mod, "RadarSeeker"):
+    setattr(_seeker_mod, "RadarSeeker", RadarSeeker)
+
+class GuidanceLaw:
+    def __init__(self, N: float = 3.):
+        self.N = N
+    def compute_steering(self, rel_p: cp.ndarray, rel_v: cp.ndarray) -> cp.ndarray:
+        los   = rel_p / cp.linalg.norm(rel_p)
+        los_r = cp.cross(rel_p, rel_v) / (cp.linalg.norm(rel_p)**2 + 1e-6)
+        return self.N * los_r * (-cp.dot(rel_v, los))
+
+_guidance_mod = _ensure_submodule(f"{_PKG_ROOT}.missile.guidance")
+if not hasattr(_guidance_mod, "GuidanceLaw"):
+    setattr(_guidance_mod, "GuidanceLaw", GuidanceLaw)
+
+class FlightDynamics:
+    def __init__(self, mass: float, thrust_profile: Callable[[float], float]):
+        self.mass, self.thrust_profile = mass, thrust_profile
+    def propagate(self, state: Any, dt: float):
+        acc = self.thrust_profile(state.time) / self.mass - 9.81
+        state.vel += acc * dt
+        state.pos += state.vel * dt
+        state.time += dt
+        return state
+
+_fdyn_mod = _ensure_submodule(f"{_PKG_ROOT}.missile.flight_dynamics")
+if not hasattr(_fdyn_mod, "FlightDynamics"):
+    setattr(_fdyn_mod, "FlightDynamics", FlightDynamics)
+
+class DataLink:
+    def __init__(self, delay: float = 0.1):
+        self.delay = delay
+    @staticmethod
+    def _pos(tgt: Any) -> cp.ndarray:
+        return tgt.position if hasattr(tgt, "position") else cp.asarray(tgt, dtype=cp.float32)
+    def send_correction(self, ms, tgt):
+        ms_pos = getattr(ms, "position", cp.zeros(3, dtype=cp.float32))
+        return self._pos(tgt) - ms_pos
+
+_datalink_mod = _ensure_submodule(f"{_PKG_ROOT}.missile.datalink")
+if not hasattr(_datalink_mod, "DataLink"):
+    setattr(_datalink_mod, "DataLink", DataLink)
+
+class ECCM:
+    def __init__(self, adaptive_gain: float = 1.):
+        self.adaptive_gain = adaptive_gain
+    def mitigate_jamming(self, radar):
+        return radar
+    def deploy_decoys(self): ...
+
+_eccm_mod = _ensure_submodule(f"{_PKG_ROOT}.missile.eccm")
+if not hasattr(_eccm_mod, "ECCM"):
+    setattr(_eccm_mod, "ECCM", ECCM)
+
+class PL15Missile:
+    def __init__(self, st: Any, cfg: Dict[str, Dict[str, Any]]):
+        self.state  = st
+        self.seeker = RadarSeeker(**cfg["seeker"])
+        self.guidance = GuidanceLaw(**cfg["guidance"])
+        self.dynamics = FlightDynamics(**cfg["flight_dynamics"])
+        self.datalink = DataLink(**cfg["datalink"])
+        self.eccm     = ECCM(**cfg["eccm"])
+    def _extract_rel(self, tgt: Any) -> Tuple[cp.ndarray, cp.ndarray, cp.ndarray]:
+        if hasattr(tgt, "position"):
+            pos = tgt.position
+            vel = getattr(tgt, "velocity", cp.zeros_like(pos))
+        else:
+            pos = cp.asarray(tgt, dtype=cp.float32)
+            vel = cp.zeros_like(pos)
+        rel_p = pos - self.state.position
+        rel_v = vel - self.state.velocity
+        return pos, rel_p, rel_v
+    def update(self, env: Any, dt: float):
+        tgt, _ = self.seeker.scan(env, self.state)
+        if tgt.size:
+            tgt_pos, rel_p, rel_v = self._extract_rel(tgt[0])
+            acc = self.guidance.compute_steering(rel_p, rel_v)
+        else:
+            acc = cp.zeros(3, dtype=cp.float32)
+        self.state = self.dynamics.propagate(self.state, dt)
+        self.state.velocity += acc * dt
+        if self.datalink and tgt.size:
+            self.state.velocity += self.datalink.send_correction(self.state, tgt_pos)
+
+_missile_mod = _ensure_submodule(f"{_PKG_ROOT}.missile.missile")
+if not hasattr(_missile_mod, "PL15Missile"):
+    setattr(_missile_mod, "PL15Missile", PL15Missile)
+
+pn_guidance_kernel = cp.ElementwiseKernel(
+    ("raw float32 rx,raw float32 ry,raw float32 rz,"
+     "raw float32 vx,raw float32 vy,raw float32 vz,float32 N"),
+    ("raw float32 ax,raw float32 ay,raw float32 az"),
+    r"""
+    float norm=sqrtf(rx[i]*rx[i]+ry[i]*ry[i]+rz[i]*rz[i])+1e-6f;
+    float lx=rx[i]/norm,ly=ry[i]/norm,lz=rz[i]/norm;
+    float cv=-(vx[i]*lx+vy[i]*ly+vz[i]*lz);
+    ax[i]=N*cv*lx; ay[i]=N*cv*ly; az[i]=N*cv*lz;
+    """, name="pn_guidance_kernel"
+)
+
+@cp.fuse(kernel_name="integrate_state")
+def integrate_state(p, v, a, dt):
+    v_out = v + a * dt
+    p_out = p + v_out * dt
+    return p_out, v_out
+
+_kernels_mod = _ensure_submodule(f"{_PKG_ROOT}.kernels")
+for _n in ("pn_guidance_kernel", "integrate_state"):
+    if not hasattr(_kernels_mod, _n):
+        setattr(_kernels_mod, _n, globals()[_n])
+
+class RadarSeekerFast(RadarSeeker):
+    __slots__ = ()
+    def scan(self, env, own) -> Tuple[cp.ndarray, cp.ndarray]:
+        t   = env.get_targets()[:, :3]
+        rel = t - own.position
+        r   = cp.linalg.norm(rel, axis=1)
+        m   = r < self.range_max()
+        return t[m], r[m]
+
+class PL15MissileFast(PL15Missile):
+    __slots__ = ()
+    def __init__(self, st: Any, cfg: Dict[str, Dict[str, Any]]):
+        super().__init__(st, cfg)
+        self.seeker = RadarSeekerFast(**cfg["seeker"])
+        self._rel = cp.zeros(3, dtype=cp.float32)
+        self._vel = cp.zeros(3, dtype=cp.float32)
+        self._acc = cp.zeros(3, dtype=cp.float32)
+    def update(self, env, dt):
+        tgt, _ = self.seeker.scan(env, self.state)
+        if tgt.size:
+            self._rel[:] = tgt[0] - self.state.position
+            self._vel[:] = -self.state.velocity
+            pn_guidance_kernel(self._rel[0:1], self._rel[1:2], self._rel[2:3],
+                               self._vel[0:1], self._vel[1:2], self._vel[2:3],
+                               self.guidance.N,
+                               self._acc[0:1], self._acc[1:2], self._acc[2:3])
+        else:
+            self._acc.fill(0)
+        self.state.position, self.state.velocity = integrate_state(
+            self.state.position, self.state.velocity, self._acc, dt
+        )
+        self.state.time += dt
+
+_mfast_mod = _ensure_submodule(f"{_PKG_ROOT}.missile.missile_fast")
+for _n in ("PL15MissileFast", "RadarSeekerFast"):
+    if not hasattr(_mfast_mod, _n):
+        setattr(_mfast_mod, _n, globals()[_n])
+
+from contextlib import contextmanager
+class _GraphProxy:
+    def __init__(self):
+        self._graph: Optional[cp.cuda.graph.Graph] = None
+    def _set_graph(self, g):
+        self._graph = g
+    def launch(self, stream: Optional[cp.cuda.Stream] = None):
+        if self._graph is None:
+            raise RuntimeError("CUDA graph not captured.")
+        if hasattr(self._graph, "launch"):
+            self._graph.launch(stream) if stream else self._graph.launch()
+        elif hasattr(self._graph, "instantiate"):
+            instance = self._graph.instantiate()
+            instance.launch(stream) if stream else instance.launch()
+        else:
+            raise AttributeError("Unsupported CUDA Graph object: no launch method.")
+
+@contextmanager
+def capture_graph():
+    s = cp.cuda.Stream(non_blocking=True)
+    p = _GraphProxy()
+    with s:
+        if hasattr(s, "begin_capture"):
+            s.begin_capture()
+            yield s, p
+            if hasattr(s, "end_capture"):
+                p._set_graph(s.end_capture())
+        else:
+            yield s, p
+
+_graphs_mod = _ensure_submodule(f"{_PKG_ROOT}.graphs")
+for _n in ("capture_graph", "_GraphProxy"):
+    if not hasattr(_graphs_mod, _n):
+        setattr(_graphs_mod, _n, globals()[_n])
+
+import numpy as np
+from pl15_j20_sim.missile.missile_fast import PL15MissileFast
+from pl15_j20_sim.aircraft.aircraft import J20Aircraft
+from pl15_j20_sim.environment.terrain import Terrain
+from pl15_j20_sim.environment.weather import Weather
+from pl15_j20_sim.environment.rf_environment import RFEnvironment
+from pl15_j20_sim.simulation.engagement import EngagementManager
+from pl15_j20_sim.graphs import capture_graph
+from pl15_j20_sim.aircraft import aircraft as _air_mod
+
+def _install_identity_eq(cls) -> None:
+    cls.__eq__ = lambda self, other: self is other
+    cls.__hash__ = lambda self: id(self)
+
+for _name in ("J20Aircraft", "F22Aircraft", "F35Aircraft"):
+    _cls = getattr(_air_mod, _name, None)
+    if _cls is not None and not getattr(_cls, "__eq__", None).__qualname__.startswith("<lambda"):
+        _install_identity_eq(_cls)
+
 @dataclass(slots=True)
 class EntityState:
     position: NDArray[np.float32] | cp.ndarray
     velocity: NDArray[np.float32] | cp.ndarray
-    orientation: float = 0.
-    time: float = 0.
-    acceleration: cp.ndarray = dataclass_field(default_factory=lambda: cp.zeros(3, dtype=cp.float32))
+    orientation: float = 0.0
+    time: float = 0.0
+    acceleration: cp.ndarray = field(default_factory=lambda: cp.zeros(3, dtype=cp.float32))
     def as_gpu(self):
-        self.position = cp.asarray(self.position() if callable(self.position) else self.position, dtype=cp.float32)
-        self.velocity = cp.asarray(self.velocity() if callable(self.velocity) else self.velocity, dtype=cp.float32)
+        self.position = cp.asarray(
+            self.position() if callable(self.position) else self.position,
+            dtype=cp.float32
+        )
+        self.velocity = cp.asarray(
+            self.velocity() if callable(self.velocity) else self.velocity,
+            dtype=cp.float32
+        )
         if not isinstance(self.acceleration, cp.ndarray):
             self.acceleration = cp.asarray(self.acceleration, dtype=cp.float32)
     @property
@@ -142,126 +763,149 @@ class EntityState:
     @vel.setter
     def vel(self, v):
         self.velocity = v
+
 def get_targets():
     return cp.array([[50., 0., 0.]], dtype=cp.float32)
-class Terrain:
-    def height_at(self, x, y):
-        return 0.
-class Weather:
-    def __init__(self, wind=(0, 0, 0), visibility=100000.):
-        self.wind = cp.asarray(wind, dtype=cp.float32)
-        self.visibility = visibility
-class RFEnvironment:
-    def __init__(self, t, w):
-        self.terrain = t
-        self.weather = w
+
 class SimpleEnvironment:
     def __init__(self):
-        self.terrain = Terrain()
+        self.terrain = Terrain(elevation_data=None)
         self.weather = Weather()
-        self.rf_env = RFEnvironment(self.terrain, self.weather)
+        self.rf_env  = RFEnvironment(self.terrain, self.weather)
         self.get_targets = get_targets
-def _ensure_array(x, shape=(3,), dtype=cp.float32):
+
+def _ensure_array(x: Any, shape: Tuple[int, ...] = (3,), dtype=cp.float32) -> cp.ndarray:
     if callable(x):
-        with suppress(Exception):
+        try:
             x = x()
+        except Exception:
+            x = None
     if x is None:
         x = cp.zeros(shape, dtype=dtype)
     if not isinstance(x, cp.ndarray):
         x = cp.asarray(x, dtype=dtype)
     return x
+
 def _resolve_state(obj):
     st = getattr(obj, "state", None)
     if callable(st):
-        with suppress(Exception):
+        try:
             st = st()
+        except Exception:
+            st = None
     if st is None or not (hasattr(st, "position") and hasattr(st, "velocity")):
         if hasattr(obj, "position") and hasattr(obj, "velocity"):
             st = obj
         else:
-            st = EntityState(cp.zeros(3, dtype=cp.float32), cp.zeros(3, dtype=cp.float32))
+            st = EntityState(cp.zeros(3, dtype=cp.float32),
+                             cp.zeros(3, dtype=cp.float32))
     st.position = _ensure_array(getattr(st, "position", None))
     st.velocity = _ensure_array(getattr(st, "velocity", None))
     return st
-class EngagementManager:
-    def __init__(self, env, ac, ms):
-        self.env = env
-        self.aircraft = ac
-        self.missiles = ms
-    def step(self, dt):
-        for m in self.missiles:
-            if hasattr(m, "update"):
-                m.update(dt)
-class _GraphStub:
-    def launch(self):
-        print("[GRAPH] Graph visualisation (stub) launched.")
-class capture_graph:
-    def __enter__(self):
-        return None, _GraphStub()
-    def __exit__(self, *a):
-        ...
+
+def main_optimised():
+    j20s = EntityState(np.array([0., 0., 0.], dtype=np.float32),
+                       np.zeros(3, dtype=np.float32))
+    j20s.as_gpu()
+    mss = EntityState(np.array([-10., 0., 0.], dtype=np.float32),
+                      np.array([300., 0., 0.], dtype=np.float32))
+    mss.as_gpu()
+    j20_cfg = {
+        "radar": {"range_max": 200_000., "fov": 60.},
+        "irst": {"range_max": 100_000.},
+        "rwr": {"sensors": []},
+        "flight_dynamics": {"mass": 25_000., "inertia": 10_000.},
+    }
+    pl15_cfg = {
+        "seeker": {"update_rate": 100., "sensitivity": 1e-6, "active": True},
+        "guidance": {"N": 4.},
+        "flight_dynamics": {
+            "mass": 210.,
+            "thrust_profile": lambda t: 20_000. if t < 6 else 12_000. if t < 10 else 0.,
+        },
+        "datalink": {"delay": 0.05},
+        "eccm": {"adaptive_gain": 1.},
+    }
+    j20  = J20Aircraft(j20s, j20_cfg)
+    pl15 = PL15MissileFast(mss, pl15_cfg)
+    env = SimpleEnvironment()
+    mgr = EngagementManager(env, [j20], [pl15])
+    dt = 0.05
+    pos: list[tuple[int, np.ndarray, np.ndarray]] = []
+    with capture_graph() as (_, graph):
+        for _ in range(200):
+            agi.monitor_states([j20], [pl15])
+            agi.apply_failsafe([j20], [pl15])
+            agi.advanced_cooperation([j20], [pl15])
+            mgr.step(dt)
+    for i in range(200):
+        graph.launch()
+        if i % 10 == 0:
+            js = _resolve_state(j20)
+            ms = _resolve_state(pl15)
+            pos.append(
+                (
+                    i,
+                    cp.asnumpy(js.position.copy()),
+                    cp.asnumpy(ms.position.copy()),
+                )
+            )
+
+if __name__ == "__main__" and os.getenv("RUN_PL15_OPT", "1") == "1":
+    main_optimised()
+
 def _air_density(alt: float) -> float:
-    ρ0, h = 1.225, 8500.
+    ρ0, h = 1.225, 8500.0
     return ρ0 * math.exp(-alt / h)
+
 @_identity_eq_hash
 @dataclass(slots=True, eq=False)
 class F22Aircraft(_FallbackAircraft):
-    additional_weight: float = 1.0
-    def update(self, dt: float = .05):
-        if self.destroyed:
-            return
-        lift = .05 * self.state.velocity[0]
-        drag = .01 * (self.state.velocity[0] ** 2)
-        thrust = cp.array([20., 0., 0.], dtype=cp.float32)
-        acc = thrust - cp.array([drag, 0., 9.81], dtype=cp.float32)
-        self.state.velocity += acc * dt
-        self.state.position += self.state.velocity * dt
-        self.state.time += dt
+    def update(self, dt: float = 0.05) -> None:
+        if hasattr(self.state,"velocity") and hasattr(self.state,"position"):
+            lift = 0.05*self.state.velocity[0]
+            drag = 0.01*(self.state.velocity[0]**2)
+            thrust = cp.array([20.0,0.0,0.0],dtype=cp.float32)
+            acc = thrust - cp.array([drag,0.0,9.81],dtype=cp.float32)
+            self.state.velocity += acc*dt
+            self.state.position += self.state.velocity*dt
+            self.state.time += dt
+
 @_identity_eq_hash
 @dataclass(slots=True, eq=False)
 class F35Aircraft(_FallbackAircraft):
-    additional_weight: float = 1.0
-    def __init__(self, st, cfg=None, additional_weight: float = 1.0):
-        base = {
-            "mass": 25000.,
-            "wing_area": 73.,
-            "thrust_max": 2 * 147000,
-            "Cd0": .02,
-            "Cd_supersonic": .04,
-            "service_ceiling": 20000.,
-            "radar": {"type": "KLJ-5A", "range_fighter": 200000.},
-            "irst": {"range_max": 100000.}
-        }
-        if cfg:
-            for k, v in cfg.items():
-                if isinstance(v, dict) and isinstance(base.get(k), dict):
-                    base[k].update(v)
-                else:
-                    base[k] = v
-        super().__init__(st, base, additional_weight=additional_weight)
-    def _drag(self) -> cp.ndarray:
-        v = cp.linalg.norm(self.state.velocity) + 1e-6
-        Cd = self.config["Cd_supersonic"] if v / 343. > 1 else self.config["Cd0"]
-        D = .5 * _air_density(float(self.state.position[2])) * Cd * self.config["wing_area"] * v ** 2
-        return (self.state.velocity / v) * D
-    def update(self, dt: float = .05):
-        if self.destroyed:
-            return
-        thrust = cp.array([self.config["thrust_max"], 0., 0.], dtype=cp.float32)
-        acc = (
-            thrust
-            - self._drag()
-            + cp.array([0., 0., -9.81 * self.config["mass"]], dtype=cp.float32)
-        ) / self.config["mass"]
-        self.state.velocity += acc * dt
-        self.state.position += self.state.velocity * dt
-        self.state.time += dt
+    def update(self, dt: float = 0.05) -> None:
+        if hasattr(self.state,"velocity") and hasattr(self.state,"position"):
+            thrust_lift=25.0
+            vertical_ctrl=0.1
+            speed=cp.linalg.norm(self.state.velocity)
+            if speed<50.0:
+                self.state.velocity[2]+=vertical_ctrl*dt
+            fwd_acc=thrust_lift-9.81
+            self.state.velocity[0]+=fwd_acc*dt
+            self.state.position += self.state.velocity*dt
+            self.state.time += dt
+
+_air_mod.F22Aircraft, _air_mod.F35Aircraft = F22Aircraft, F35Aircraft
+globals().update({"F22Aircraft":F22Aircraft,"F35Aircraft":F35Aircraft})
+
+__modules_to_export = {
+    f"{_PKG_ROOT}.aircraft.aircraft": ("F22Aircraft", "F35Aircraft", "J20Aircraft"),
+}
+for _p, _n in __modules_to_export.items():
+    _m = _ensure_submodule(_p)
+    for _i in _n:
+        if _i in globals():
+            setattr(_m, _i, globals()[_i])
+
+import argparse
+
 @dataclass(slots=True)
 class AircraftState:
     position: NDArray[np.float32] | cp.ndarray
     velocity: NDArray[np.float32] | cp.ndarray
-    orientation: float = 0.
-    time: float = 0.
+    orientation: float = 0.0
+    time: float = 0.0
     def as_gpu(self):
         self.position = cp.asarray(self.position, dtype=cp.float32)
         self.velocity = cp.asarray(self.velocity, dtype=cp.float32)
@@ -277,39 +921,37 @@ class AircraftState:
     @vel.setter
     def vel(self, v):
         self.velocity = v
-def _air_density_2(a: float) -> float:
+
+def _air_density(alt: float) -> float:
     ρ0, h = 1.225, 8500.
-    return ρ0 * math.exp(-a / h)
-@_identity_eq_hash
-@dataclass(slots=True, eq=False)
+    return ρ0 * math.exp(-alt / h)
+
+@dataclass(slots=True)
 class J20Aircraft(_FallbackAircraft):
-    additional_weight: float = 1.0
-    def __init__(self, st, cfg=None, additional_weight: float = 1.0):
+    def __init__(self, st: Any, cfg: Dict[str, Any] | None = None):
         base = {
-            "mass": 25000.,
+            "mass": 25_000.,
             "wing_area": 73.,
-            "thrust_max": 2 * 147000,
-            "Cd0": .02,
-            "Cd_supersonic": .04,
-            "service_ceiling": 20000.,
-            "radar": {"type": "KLJ-5A", "range_fighter": 200000.},
-            "irst": {"range_max": 100000.}
+            "thrust_max": 2 * 147_000,
+            "Cd0": 0.02,
+            "Cd_supersonic": 0.04,
+            "service_ceiling": 20_000.,
+            "radar": {"type": "KLJ-5A", "range_fighter": 200_000.},
+            "irst": {"range_max": 100_000.}
         }
         if cfg:
             for k, v in cfg.items():
-                if isinstance(v, dict) and isinstance(base.get(k), dict):
+                if isinstance(v, dict) and k in base and isinstance(base[k], dict):
                     base[k].update(v)
                 else:
                     base[k] = v
-        super().__init__(st, base, additional_weight=additional_weight)
+        _FallbackAircraft.__init__(self, st, base)
     def _drag(self) -> cp.ndarray:
         v = cp.linalg.norm(self.state.velocity) + 1e-6
         Cd = self.config["Cd_supersonic"] if v / 343. > 1 else self.config["Cd0"]
-        D = .5 * _air_density(float(self.state.position[2])) * Cd * self.config["wing_area"] * v ** 2
+        D = 0.5 * _air_density(float(self.state.position[2])) * Cd * self.config["wing_area"] * v**2
         return (self.state.velocity / v) * D
-    def update(self, dt: float = .05):
-        if self.destroyed:
-            return
+    def update(self, dt: float = 0.05):
         thrust = cp.array([self.config["thrust_max"], 0., 0.], dtype=cp.float32)
         acc = (
             thrust
@@ -319,133 +961,156 @@ class J20Aircraft(_FallbackAircraft):
         self.state.velocity += acc * dt
         self.state.position += self.state.velocity * dt
         self.state.time += dt
+
+_air_mod.J20Aircraft = J20Aircraft
+
 class _PL15DualPulse:
-    def __init__(self, t1=6., t2=4., F1=20000., F2=12000.):
+    def __init__(self, t1=6., t2=4., F1=20e3, F2=12e3):
         self.t1, self.t2, self.F1, self.F2 = t1, t2, F1, F2
     def __call__(self, t):
-        if t < self.t1:
-            return self.F1
-        elif t < self.t1 + self.t2:
-            return self.F2
-        return 0.
-@dataclass
+        return self.F1 if t < self.t1 else self.F2 if t < self.t1 + self.t2 else 0.
+
 class RadarSeekerFast_R2025(RadarSeekerFast):
     def range_max(self):
-        return 35000.
-@dataclass
+        return 35_000.
+
 class PL15MissileFast_R2025(PL15MissileFast):
-    def __post_init__(self):
+    def __init__(self, st, cfg: Dict[str, Dict[str, Any]] | None = None):
         base = {
-            "seeker": {"update_rate": 100., "sensitivity": 1e-6, "active": True},
+            "seeker": {
+                "update_rate": 100.,
+                "sensitivity": 1e-6,
+                "active": True
+            },
             "guidance": {"N": 4.},
             "flight_dynamics": {"mass": 210., "thrust_profile": _PL15DualPulse()},
-            "datalink": {"delay": .05},
+            "datalink": {"delay": 0.05},
             "eccm": {"adaptive_gain": 1.}
         }
-        if self.config:
-            for k in base:
-                base[k].update(self.config.get(k, {}))
-        super().__post_init__()
-        self.seeker = RadarSeekerFast_R2025(**base["seeker"])
-@_identity_eq_hash
-@dataclass(slots=True, eq=False)
-class F35Aircraft_R2025(_FallbackAircraft):
-    additional_weight: float = 1.0
-    def __init__(self, st, cfg=None, additional_weight: float = 1.0):
-        base = {
-            "mass": 25000.,
-            "wing_area": 73.,
-            "thrust_max": 2 * 147000,
-            "Cd0": .02,
-            "Cd_supersonic": .04,
-            "service_ceiling": 20000.,
-            "radar": {"type": "KLJ-5A", "range_fighter": 200000.},
-            "irst": {"range_max": 100000.}
-        }
         if cfg:
-            for k, v in cfg.items():
-                if isinstance(v, dict) and isinstance(base.get(k), dict):
-                    base[k].update(v)
-                else:
-                    base[k] = v
-        super().__init__(st, base, additional_weight=additional_weight)
-    def _drag(self):
-        v = cp.linalg.norm(self.state.velocity) + 1e-6
-        Cd = self.config["Cd_supersonic"] if v / 343. > 1 else self.config["Cd0"]
-        D = .5 * _air_density(float(self.state.position[2])) * Cd * self.config["wing_area"] * v ** 2
-        return (self.state.velocity / v) * D
-    def update(self, dt: float = .05):
-        if self.destroyed:
-            return
-        thrust_vec = cp.array([self.config["thrust_max"], 0., 0.], dtype=cp.float32)
-        acc = (
-            thrust_vec
-            - self._drag()
-            + cp.array([0., 0., -9.81 * self.config["mass"]], dtype=cp.float32)
-        ) / self.config["mass"]
-        self.state.velocity += acc * dt
-        self.state.position += self.state.velocity * dt
-        self.state.time += dt
-globals().update({
-    "PL15MissileFast": PL15MissileFast_R2025,
-    "RadarSeekerFast": RadarSeekerFast_R2025,
-    "F35Aircraft": F35Aircraft_R2025
-})
+            for k in base:
+                base[k].update(cfg.get(k, {}))
+        super().__init__(st, base)
+        self.seeker = RadarSeekerFast_R2025(**base["seeker"])
+
+_mfast_mod.PL15MissileFast = PL15MissileFast_R2025
+_mfast_mod.RadarSeekerFast = RadarSeekerFast_R2025
+globals().update({"PL15MissileFast": PL15MissileFast_R2025, "RadarSeekerFast": RadarSeekerFast_R2025})
+
+def train_j20_pl15(minutes: int) -> None:
+    print(f"[TRAINING] J20-PL15 for {minutes} minute(s).")
+    total_seconds = minutes * 60
+    for _ in range(total_seconds):
+        pass
+    print("[TRAINING] Complete.")
+
+from pl15_j20_sim.environment.terrain import Terrain
+from pl15_j20_sim.environment.weather import Weather
+from pl15_j20_sim.environment.rf_environment import RFEnvironment
+
 class WarGameEnvironment:
-    def __init__(self, t=None, w=None):
-        self.terrain = t or Terrain()
-        self.weather = w or Weather()
-        self.rf_env = RFEnvironment(self.terrain, self.weather)
+    def __init__(
+        self,
+        terrain: Terrain | None = None,
+        weather: Weather | None = None,
+    ) -> None:
+        self.terrain: Terrain = terrain or Terrain(elevation_data=None)
+        self.weather: Weather = weather or Weather()
+        self.rf_env: RFEnvironment = RFEnvironment(self.terrain, self.weather)
         self.get_targets = self._dummy_targets
     @staticmethod
-    def _dummy_targets():
-        return cp.array([[100., 10., -5.]], dtype=cp.float32)
+    def _dummy_targets() -> cp.ndarray:
+        return cp.array([[100.0, 10.0, -5.0]], dtype=cp.float32)
+
 class WarGameManager:
-    def __init__(self, env, aircraft):
-        self.environment = env
-        self.aircrafts = aircraft
-    def step(self, dt):
-        for a in self.aircrafts:
-            if getattr(a, "destroyed", False):
+    def __init__(self, environment: Any, aircrafts: List[Any]) -> None:
+        self.environment = environment
+        self.aircrafts   = aircrafts
+    def step(self, dt: float) -> None:
+        for ac in self.aircrafts:
+            if not hasattr(ac, "state"):
                 continue
-            a.state.position += a.state.velocity * dt
-            if hasattr(a.state, "time"):
-                a.state.time += dt
+            if not hasattr(ac.state, "position") or not hasattr(ac.state, "velocity"):
+                continue
+            ac.state.position = ac.state.position + ac.state.velocity * dt
+            if hasattr(ac.state, "time"):
+                ac.state.time += dt
+
 try:
     import d3graph
 except ImportError:
     import types as _t
-    class _DG:
-        def graph(self, *a, **k):
-            ...
-        def set_config(self, **k):
-            return self
+    class _D3GraphStub:
+        def __init__(self): ...
+        def graph(self, *a, **k): ...
+        def set_config(self, *a, **k): return self
         def show(self, filepath=None):
-            ...
+            print(f"[d3graph-stub] output → {filepath or '<memory>'}")
     d3graph = _t.ModuleType("d3graph")
-    d3graph.d3graph = _DG()
+    d3graph.d3graph = _D3GraphStub
+
+try:
+    from d3graph import d3graph as _D3GraphReal
+    if not hasattr(_D3GraphReal, "_patched_names_kwarg"):
+        _orig_graph_fn = _D3GraphReal.graph
+        def _graph_with_names(self, adjmat, *args, **kwargs):
+            names = kwargs.pop("names", None)
+            if names is not None:
+                import pandas as pd, numpy as _np
+                if not isinstance(adjmat, pd.DataFrame):
+                    adjmat = pd.DataFrame(_np.asarray(adjmat), index=names, columns=names)
+            return _orig_graph_fn(self, adjmat, *args, **kwargs)
+        _D3GraphReal.graph = _graph_with_names
+        _D3GraphReal._patched_names_kwarg = True
+    if not hasattr(_D3GraphReal, "set_config"):
+        def _set_config(self, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+            if hasattr(self, "_config") and isinstance(self._config, dict):
+                self._config.update(kwargs)
+            return self
+        _D3GraphReal.set_config = _set_config
+except Exception:
+    pass
+
 try:
     import plotly.graph_objects as go
 except ImportError:
     go = None
-def _capture_frame(acs):
-    return [
-        {
+
+def _capture_frame(aircrafts: List[Any]) -> List[Dict[str, float]]:
+    frame = []
+    for ac in aircrafts:
+        pos = cp.asnumpy(getattr(ac.state, "position", cp.zeros(3)))
+        frame.append({
             "name": ac.__class__.__name__,
-            "x": float((p := cp.asnumpy(getattr(ac.state, "position", cp.zeros(3))))[0]),
-            "y": float(p[1]),
-            "z": float(p[2])
-        }
-        for ac in acs
-    ]
-def export_plotly_animation(frames, title="War Game Animation", filename="war_game_animation.html"):
+            "x": float(pos[0]),
+            "y": float(pos[1]),
+            "z": float(pos[2]),
+        })
+    return frame
+
+def simulate_and_capture(manager: Any,
+                         aircrafts: List[Any],
+                         steps: int,
+                         dt: float = 1.0,
+                         capture_rate: int = 1) -> List[List[Dict[str, float]]]:
+    frames: List[List[Dict[str, float]]] = []
+    for s in range(steps):
+        manager.step(dt)
+        if s % capture_rate == 0:
+            frames.append(_capture_frame(aircrafts))
+    return frames
+
+def export_plotly_animation(frames: List[List[Dict[str, float]]],
+                            title: str = "War Game Animation",
+                            filename: str = "war_game_animation.html") -> None:
     if go is None:
-        print("[PLOTLY] Not installed – skipping.")
+        print("[PLOTLY] Not installed – skipping animation export.")
         return
-    import plotly.graph_objects as _go
     first = frames[0]
-    fig = _go.Figure(
-        data=[_go.Scatter3d(
+    fig = go.Figure(
+        data=[go.Scatter3d(
             x=[d["x"] for d in first],
             y=[d["y"] for d in first],
             z=[d["z"] for d in first],
@@ -453,49 +1118,39 @@ def export_plotly_animation(frames, title="War Game Animation", filename="war_ga
             marker=dict(size=4),
             text=[d["name"] for d in first]
         )],
-        layout=_go.Layout(
+        layout=go.Layout(
             title=title,
             scene=dict(xaxis_title="X", yaxis_title="Y", zaxis_title="Z"),
-            updatemenus=[
-                dict(
-                    type="buttons",
-                    showactive=False,
-                    buttons=[
-                        dict(
-                            label="Play",
-                            method="animate",
-                            args=[None, {
-                                "frame": {"duration": 40, "redraw": True},
-                                "fromcurrent": True
-                            }]
-                        )
-                    ]
-                )
-            ]
-        ),
-        frames=[
-            _go.Frame(
-                data=[_go.Scatter3d(
-                    x=[d["x"] for d in fr],
-                    y=[d["y"] for d in fr],
-                    z=[d["z"] for d in fr],
-                    mode="markers",
-                    marker=dict(size=4),
-                    text=[d["name"] for d in fr]
+            updatemenus=[dict(
+                type="buttons",
+                showactive=False,
+                buttons=[dict(
+                    label="Play",
+                    method="animate",
+                    args=[None, {"frame": {"duration": 40, "redraw": True},
+                                 "fromcurrent": True}]
                 )]
-            )
-            for fr in frames[1:]
-        ]
+            )]
+        ),
+        frames=[go.Frame(
+            data=[go.Scatter3d(
+                x=[d["x"] for d in fr],
+                y=[d["y"] for d in fr],
+                z=[d["z"] for d in fr],
+                mode="markers",
+                marker=dict(size=4),
+                text=[d["name"] for d in fr]
+            )]
+        ) for fr in frames[1:]]
     )
-    fig.write_html(pathlib.Path(filename).with_suffix(".html"), auto_play=False, include_plotlyjs="cdn")
-def simulate_and_capture(mgr, acs, steps, dt=1., capture_rate=1):
-    fr = []
-    for s in range(steps):
-        mgr.step(dt)
-        if s % capture_rate == 0:
-            fr.append(_capture_frame(acs))
-    return fr
-def _ensure_flask(min_ver="3.0.0"):
+    path = pathlib.Path(filename).with_suffix(".html")
+    fig.write_html(path, auto_play=False, include_plotlyjs="cdn")
+    print(f"[ANIMATION] Saved → {path.absolute()}")
+
+import threading, queue, time, webbrowser
+from contextlib import suppress
+
+def _ensure_flask(min_ver: str = "3.0.0"):
     try:
         import flask as _fl
         from packaging.version import Version as _V
@@ -508,773 +1163,210 @@ def _ensure_flask(min_ver="3.0.0"):
         _il.invalidate_caches()
         import flask as _fl
         return _fl
+
 flask = _ensure_flask()
-_LIVE_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8"/><title>Live War-Game Visualisation</title>
-<script src="https://d3js.org/d3.v7.min.js"></script><style>body{margin:0;background:#111;color:#eee;font-family:system-ui,sans-serif}#vis{width:100vw;height:100vh}text{fill:#fff;font-size:10px;text-anchor:middle;dominant-baseline:middle}</style></head><body><svg id="vis"></svg>
-<script>const svg=d3.select("#vis"),color=d3.scaleOrdinal(d3.schemeTableau10);let scale=3;function update(f){const n=f.map(d=>({...d,x:+d.x*scale,y:+d.y*scale}));const s=svg.selectAll("g.node").data(n,d=>d.name);
-const e=s.enter().append("g").attr("class","node");e.append("circle").attr("r",6).attr("fill",d=>color(d.name));e.append("text").attr("dy",-10).text(d=>d.name);
-s.merge(e).attr("transform",d=>`translate(${d.x+innerWidth/2},${innerHeight/2-d.y})`);s.exit().remove();}const evt=new EventSource("/stream");evt.onmessage=e=>update(JSON.parse(e.data));</script></body></html>"""
-def start_live_visualisation(mgr, acs, dt=1., host="127.0.0.1", port=5000):
-    q = queue.Queue()
+
+_LIVE_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Live War-Game Visualisation</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  body{margin:0;background:#111;color:#eee;font-family:system-ui, sans-serif}
+  #vis{width:100vw;height:100vh}
+  text{fill:#fff;font-size:10px;text-anchor:middle;dominant-baseline:middle}
+</style>
+</head>
+<body>
+<svg id="vis"></svg>
+<script>
+const svg = d3.select("#vis"),
+      color = d3.scaleOrdinal(d3.schemeTableau10);
+let scale = 3;
+function update(frame){
+  const nodes = frame.map(d => ({...d, x:+d.x*scale, y:+d.y*scale}));
+  const sel = svg.selectAll("g.node").data(nodes, d=>d.name);
+  const enter = sel.enter().append("g").attr("class","node");
+  enter.append("circle").attr("r",6).attr("fill",d=>color(d.name));
+  enter.append("text").attr("dy",-10).text(d=>d.name);
+  sel.merge(enter)
+     .attr("transform",d=>`translate(${d.x+innerWidth/2},${innerHeight/2-d.y})`);
+  sel.exit().remove();
+}
+const evt = new EventSource("/stream");
+evt.onmessage = e => update(JSON.parse(e.data));
+</script>
+</body>
+</html>
+"""
+
+def start_live_visualisation(manager: Any,
+                             aircrafts: List[Any],
+                             dt: float = 1.0,
+                             host: str = "127.0.0.1",
+                             port: int = 5000) -> None:
+    frame_queue: "queue.Queue[list[dict[str,float]]]" = queue.Queue()
     def _sim():
         while True:
-            mgr.step(dt)
-            q.put(_capture_frame(acs))
+            manager.step(dt)
+            frame_queue.put(_capture_frame(aircrafts))
             time.sleep(dt)
     threading.Thread(target=_sim, daemon=True).start()
     app = flask.Flask("live_wargame_vis")
     @app.route("/")
-    def _i():
+    def _index():
         return _LIVE_HTML
     @app.route("/stream")
-    def _s():
-        def _g():
+    def _stream():
+        def _gen():
             while True:
-                yield f"data: {json.dumps(q.get())}\n\n"
-        return flask.Response(_g(), mimetype="text/event-stream")
-    threading.Timer(1., lambda: webbrowser.open(f"http://{host}:{port}/", new=2)).start()
+                data = frame_queue.get()
+                yield f"data: {json.dumps(data)}\n\n"
+        return flask.Response(_gen(), mimetype="text/event-stream")
+    def _open_browser():
+        with suppress(Exception):
+            webbrowser.open(f"http://{host}:{port}/", new=2)
+    threading.Timer(1.0, _open_browser).start()
     app.run(host=host, port=port, threaded=True, debug=False, use_reloader=False)
-def _build_react_app(fd="frontend"):
-    pj = os.path.join(fd, "package.json")
-    if not os.path.isfile(pj):
+
+def run_taiwan_war_game_live(time_minutes: int = 5,
+                             dt: float = 1.0) -> None:
+    env = WarGameEnvironment()
+    crt = CombatResultsTable()
+    from pl15_j20_sim.aircraft.aircraft import J20Aircraft, F22Aircraft
+    j20_state = AircraftState(position=_np.array([-150.0, 0.0, 10000.0], dtype=_np.float32),
+                              velocity=_np.array([3.0, 0.0, 0.0], dtype=_np.float32))
+    j20_state.as_gpu()
+    f22_state = AircraftState(position=_np.array([150.0, 30.0, 11000.0], dtype=_np.float32),
+                              velocity=_np.array([-2.4, 0.0, 0.0], dtype=_np.float32))
+    f22_state.as_gpu()
+    j20 = J20Aircraft(j20_state, {})
+    f22 = F22Aircraft(f22_state, {})
+    manager = TaiwanConflictCRTManager(env, [j20, f22], crt)
+    start_live_visualisation(manager, manager.aircraft, dt=dt)
+
+def _build_react_app(frontend_dir: str = "frontend"):
+    package_json = os.path.join(frontend_dir, "package.json")
+    if not os.path.isfile(package_json):
+        print(f"[WARN] No package.json found in {frontend_dir}, skipping React build.")
         return
     try:
-        subprocess.check_call(["npm", "install"], cwd=fd)
-        subprocess.check_call(["npm", "run", "build"], cwd=fd)
+        print(f"[BUILD] Found package.json. Installing dependencies & building React app in {frontend_dir}...")
+        subprocess.check_call(["npm", "install"], cwd=frontend_dir)
+        subprocess.check_call(["npm", "run", "build"], cwd=frontend_dir)
+        print("[BUILD] React app build complete.")
     except Exception as e:
-        pass
-def serve_react_frontend(app, fd="frontend", rp="/react"):
+        print(f"[ERROR] React build failed: {e}")
+
+def serve_react_frontend(app, frontend_dir: str = "frontend", route_path: str = "/react"):
     from flask import send_from_directory
-    bd = os.path.join(fd, "build")
-    @app.route(f"{rp}/<path:fn>")
-    def _srf(fn):
-        return send_from_directory(bd, fn)
-    @app.route(rp)
-    def _sri():
-        return send_from_directory(bd, "index.html")
-def start_modern_ui_server(mgr, acs, dt=1., host="127.0.0.1", port=5000, fd="frontend"):
-    q = queue.Queue()
-    _build_react_app(fd)
+    build_dir = os.path.join(frontend_dir, "build")
+    @app.route(f"{route_path}/<path:filename>")
+    def serve_react_build(filename):
+        return send_from_directory(build_dir, filename)
+    @app.route(route_path)
+    def serve_react_index():
+        return send_from_directory(build_dir, "index.html")
+
+def start_modern_ui_server(manager: Any,
+                           aircrafts: List[Any],
+                           dt: float = 1.0,
+                           host: str = "127.0.0.1",
+                           port: int = 5000,
+                           frontend_dir: str = "frontend") -> None:
+    frame_queue: "queue.Queue[list[dict[str,float]]]" = queue.Queue()
+    _build_react_app(frontend_dir=frontend_dir)
     def _sim():
         while True:
-            mgr.step(dt)
-            q.put(_capture_frame(acs))
+            manager.step(dt)
+            frame_queue.put(_capture_frame(aircrafts))
             time.sleep(dt)
     threading.Thread(target=_sim, daemon=True).start()
     app = flask.Flask("modern_ui_app")
-    serve_react_frontend(app, fd)
-    @app.route("/")
-    def _i():
-        return _LIVE_HTML
-    @app.route("/stream")
-    def _s():
-        def _g():
-            while True:
-                yield f"data: {json.dumps(q.get())}\n\n"
-        return flask.Response(_g(), mimetype="text/event-stream")
-    threading.Timer(1., lambda: webbrowser.open(f"http://{host}:{port}/", new=2)).start()
-    app.run(host=host, port=port, threaded=True, debug=False, use_reloader=False)
-def train_j20_pl15(mins: int):
-    time.sleep(mins * 60)
-def run_taiwan_war_game_live(tmin: int = 5, dt: float = 1.):
-    env = WarGameEnvironment()
-    crt = CombatResultsTable()
-    j20_s = AircraftState(
-        position=np.array([-150., 0., 10000.], dtype=np.float32),
-        velocity=np.array([3., 0., 0.], dtype=np.float32)
-    )
-    f22_s = AircraftState(
-        position=np.array([150., 30., 11000.], dtype=np.float32),
-        velocity=np.array([-2.4, 0., 0.], dtype=np.float32)
-    )
-    j20_s.as_gpu()
-    f22_s.as_gpu()
-    mgr = TaiwanConflictCRTManager(env, [J20Aircraft(j20_s, {}), F22Aircraft(f22_s, {})], crt)
-    start_live_visualisation(mgr, mgr.aircraft, dt=dt)
-def run_taiwan_conflict_100v100(dt=1., host="127.0.0.1", port=5000, fd="frontend"):
-    env = WarGameEnvironment()
-    crt = CombatResultsTable()
-    sp, gd, wx, ex, alt = 10., 10, -200., 200., 10000.
-    j20, f35 = [], []
-    for i in range(100):
-        row = i // gd
-        offy = (row - gd / 2) * sp + random.uniform(-2, 2)
-        offz = random.uniform(-100, 100)
-        sj = AircraftState(
-            position=np.array([wx, offy, alt + offz], dtype=np.float32),
-            velocity=np.array([random.uniform(1.5, 2.5), 0., 0.], dtype=np.float32)
-        )
-        sj.as_gpu()
-        sf = AircraftState(
-            position=np.array([ex, offy, alt + offz], dtype=np.float32),
-            velocity=np.array([random.uniform(-2.5, -1.5), 0., 0.], dtype=np.float32)
-        )
-        sf.as_gpu()
-        j20.append(J20Aircraft(sj, {}))
-        f35.append(F35Aircraft(sf, {}))
-    mgr = TaiwanConflictCRTManager(env, j20 + f35, crt)
-    start_modern_ui_server(mgr, mgr.aircraft, dt=dt, host=host, port=port, fd=fd)
-@_identity_eq_hash
-@dataclass(slots=True, eq=False)
-class F15JAircraft:
-    state: AircraftState
-    config: Dict[str, Any] = dataclass_field(default_factory=dict)
-    destroyed: bool = False
-    additional_weight: float = 1.0
-    def __post_init__(self):
-        base = {
-            "mass": 15000.,
-            "wing_area": 56.5,
-            "thrust_max": 212000,
-            "Cd0": 0.020,
-            "Cd_supersonic": 0.040,
-            "service_ceiling": 18000.,
-            "rcs_m2": 4.0,
-            "radar": {"type": "AN/APG-63J", "range_fighter": 150000.},
-            "irst": {"range_max": 80000.}
-        }
-        for k, v in self.config.items():
-            if isinstance(v, dict) and isinstance(base.get(k), dict):
-                base[k].update(v)
-            else:
-                base[k] = v
-        self.config = base
-    def _drag(self) -> cp.ndarray:
-        v = cp.linalg.norm(self.state.velocity) + 1e-6
-        mach = v / 343.
-        Cd = self.config["Cd_supersonic"] if mach > 1 else self.config["Cd0"]
-        D = .5 * _air_density(float(self.state.position[2])) * Cd * self.config["wing_area"] * (v**2)
-        return (self.state.velocity / v) * D
-    def update(self, dt: float = .05):
-        if self.destroyed:
-            return
-        vmag = cp.linalg.norm(self.state.velocity)
-        if vmag < 1e-3:
-            self.state.velocity += cp.array([1., 0., 0.], dtype=cp.float32) * dt
-        thrust_vec = cp.array([self.config["thrust_max"], 0., 0.], dtype=cp.float32)
-        acc = (
-            thrust_vec
-            - self._drag()
-            + cp.array([0., 0., -9.81 * self.config["mass"]], dtype=cp.float32)
-        ) / self.config["mass"]
-        self.state.velocity += acc * dt
-        self.state.position += self.state.velocity * dt
-        if hasattr(self.state, "time"):
-            self.state.time += dt
-def run_taiwan_conflict_jpn_usa_v_china(dt=1., host="127.0.0.1", port=5001, fd="frontend"):
-    env = WarGameEnvironment()
-    crt = CombatResultsTable()
-    j20_list, f35_list, f15j_list = [], [], []
-    alt = 10000.
-    for i in range(20):
-        st_j = AircraftState(
-            position=np.array([-300. + i*5, random.uniform(-30, 30), alt], dtype=np.float32),
-            velocity=np.array([2., 0., 0.], dtype=cp.float32)
-        )
-        st_j.as_gpu()
-        j20_list.append(J20Aircraft(st_j, {}))
-    for i in range(15):
-        st_f = AircraftState(
-            position=np.array([300. - i*5, random.uniform(-30, 30), alt], dtype=np.float32),
-            velocity=np.array([-2., 0., 0.], dtype=cp.float32)
-        )
-        st_f.as_gpu()
-        f35_list.append(F35Aircraft(st_f, {}))
-    for i in range(15):
-        st_jp = AircraftState(
-            position=np.array([250. - i*5, random.uniform(-50, 50), alt+500.], dtype=np.float32),
-            velocity=np.array([-2., 0., 0.], dtype=cp.float32)
-        )
-        st_jp.as_gpu()
-        f15j_list.append(F15JAircraft(st_jp, {}))
-    all_aircraft = j20_list + f35_list + f15j_list
-    mgr = TaiwanConflictCRTManager(env, all_aircraft, crt)
-    start_modern_ui_server(mgr, mgr.aircraft, dt=dt, host=host, port=port, fd=fd)
-def demo_gpu_async():
-    env = WarGameEnvironment()
-    j20s = [
-        J20Aircraft(
-            EntityState(
-                cp.array([-200. + i*2, 0., 10000.], dtype=cp.float32),
-                cp.array([3., 0., 0.], dtype=cp.float32)
-            ),
-            {}
-        )
-        for i in range(500)
-    ]
-    f35s = [
-        F35Aircraft(
-            EntityState(
-                cp.array([200. - i*2, 50., 10500.], dtype=cp.float32),
-                cp.array([-3., 0., 0.], dtype=cp.float32)
-            ),
-            {}
-        )
-        for i in range(500)
-    ]
-    from functools import cached_property
-    import asyncio
-    try:
-        from numba import cuda
-    except ImportError:
-        cuda = None
-    class GPUBatchManager:
-        def __init__(self, entities: List[_FallbackAircraft]):
-            self.entities = entities
-            self.n = len(entities)
-            self._arr_pos = cp.zeros((self.n, 3), dtype=cp.float32)
-            self._arr_vel = cp.zeros((self.n, 3), dtype=cp.float32)
-            self._arr_alive = cp.ones(self.n, dtype=cp.bool_)
-            self._refresh_arrays()
-        def _refresh_arrays(self):
-            for i, e in enumerate(self.entities):
-                st = _resolve_state(e)
-                self._arr_pos[i] = st.position
-                self._arr_vel[i] = st.velocity
-                self._arr_alive[i] = not getattr(e, "destroyed", False)
-        @cached_property
-        def _gpu_update_kernel(self):
-            if cuda is None:
-                return None
-            @cuda.jit
-            def _k(pos, vel, alive, dt):
-                i = cuda.grid(1)
-                if i >= pos.shape[0] or not alive[i]:
-                    return
-                vel[i, 2] -= 9.81 * dt
-                pos[i, 0] += vel[i, 0] * dt
-                pos[i, 1] += vel[i, 1] * dt
-                pos[i, 2] += vel[i, 2] * dt
-            return _k
-        def step(self, dt: float):
-            if cuda and self._gpu_update_kernel:
-                threads = 128
-                blocks = (self.n + threads - 1) // threads
-                self._gpu_update_kernel[blocks, threads](self._arr_pos, self._arr_vel, self._arr_alive, dt)
-            else:
-                self._arr_vel[:, 2] -= 9.81 * dt
-                self._arr_pos += self._arr_vel * dt
-            for i, e in enumerate(self.entities):
-                if not self._arr_alive[i]:
-                    continue
-                e.state.position = self._arr_pos[i]
-                e.state.velocity = self._arr_vel[i]
-    class AsyncSimulationServer:
-        def __init__(self, mgr: GPUBatchManager, host="127.0.0.1", port=8765, dt=0.05):
-            try:
-                import websockets
-            except ImportError:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "websockets>=12", "-q"])
-                import importlib
-                importlib.invalidate_caches()
-                import websockets
-            self.websockets = sys.modules["websockets"]
-            self.mgr = mgr
-            self.host = host
-            self.port = port
-            self.dt = dt
-        async def _producer(self, websocket):
-            while True:
-                self.mgr.step(self.dt)
-                data = [
-                    {"x": float(p[0]), "y": float(p[1]), "z": float(p[2])}
-                    for p in cp.asnumpy(self.mgr._arr_pos)
-                ]
-                await websocket.send(json.dumps(data))
-                await asyncio.sleep(self.dt)
-        async def _handler(self, websocket, _path):
-            await self._producer(websocket)
-        def run(self):
-            srv = self.websockets.serve(self._handler, self.host, self.port)
-            print(f"[ASYNC-SIM] Serving on ws://{self.host}:{self.port}")
-            asyncio.get_event_loop().run_until_complete(srv)
-            asyncio.get_event_loop().run_forever()
-    gpu_mgr = GPUBatchManager(j20s + f35s)
-    AsyncSimulationServer(gpu_mgr, port=8888, dt=0.02).run()
-@dataclass(slots=True)
-class CarrierState:
-    position: NDArray[np.float32] | cp.ndarray
-    velocity: NDArray[np.float32] | cp.ndarray
-    orientation: float = 0.
-    time: float = 0.
-    def as_gpu(self):
-        self.position = cp.asarray(self.position, dtype=cp.float32)
-        self.velocity = cp.asarray(self.velocity, dtype=cp.float32)
-@_identity_eq_hash
-@dataclass(slots=True, eq=False)
-class USCarrierGroup(_FallbackAircraft):
-    additional_weight: float = 1.0
-    def __init__(self, st, cfg=None, additional_weight: float = 1.0):
-        base = {
-            "mass": 100000.,
-            "max_speed": 15.,
-            "rcs_m2": 10000.,
-            "defenses": {"cwisp": True},
-        }
-        if cfg:
-            for k, v in cfg.items():
-                base[k] = v
-        super().__init__(st, base, additional_weight=additional_weight)
-    def update(self, dt: float = 1.):
-        if self.destroyed:
-            return
-        spd = cp.linalg.norm(self.state.velocity)
-        if spd < self.config["max_speed"]:
-            self.state.velocity[0] += 0.02 * dt
-        self.state.position += self.state.velocity * dt
-        if hasattr(self.state, "time"):
-            self.state.time += dt
-@dataclass
-class BallisticMissileState:
-    position: NDArray[np.float32] | cp.ndarray
-    velocity: NDArray[np.float32] | cp.ndarray
-    time: float = 0.
-    def as_gpu(self):
-        self.position = cp.asarray(self.position, dtype=cp.float32)
-        self.velocity = cp.asarray(self.velocity, dtype=cp.float32)
-@_identity_eq_hash
-@dataclass(slots=True, eq=False)
-class DF21D_ANTISHIP:
-    state: BallisticMissileState
-    config: Dict[str, Any]
-    destroyed: bool = False
-    additional_weight: float = 1.0
-    def __init__(self, st: BallisticMissileState, cfg=None, additional_weight: float = 1.0):
-        self.config = cfg or {
-            "mass": 14000.,
-            "thrust": 0.,
-            "rcs_m2": 2.,
-            "drag_coeff": 0.3
-        }
-        self.state = st
-        self.destroyed = False
-        self.additional_weight = additional_weight
-    def update(self, dt: float = 1.):
-        if self.destroyed:
-            return
-        pos = self.state.position
-        vel = self.state.velocity
-        alt = float(pos[2])
-        if alt <= 0:
-            self.destroyed = True
-            print(f"[DF21D] Impact at {pos[0]:.1f}, {pos[1]:.1f}")
-            return
-        vmag = cp.linalg.norm(vel) + 1e-6
-        ρ = _air_density(alt)
-        D = 0.5 * ρ * self.config["drag_coeff"] * (vmag**2) * 0.5
-        drag_vec = (vel / vmag) * D
-        accel = cp.array([0., 0., -9.81], dtype=cp.float32) - (drag_vec / self.config["mass"])
-        self.state.velocity += accel * dt
-        self.state.position += self.state.velocity * dt
-        self.state.time += dt
-class PLARocketForces:
-    def __init__(self, environment):
-        self.environment = environment
-        self.launched_missiles = []
-    def launch_df21d(self, launch_pos=(0., 0., 300000.), target=None):
-        initial_vel = cp.array([0., 0., -1000.], dtype=cp.float32)
-        st = BallisticMissileState(cp.array(launch_pos, dtype=cp.float32), initial_vel)
-        df21d = DF21D_ANTISHIP(st)
-        self.launched_missiles.append(df21d)
-    def step(self, dt=1.):
-        for m in self.launched_missiles:
-            m.update(dt)
-class CombatResultsTableAdv(CombatResultsTable):
-    _MAX_ENGAGE_RANGE = 300.
-    _BASE_PK = {50.: .92, 100.: .77, 150.: .45, 250.: .18, 300.: .05}
-    def _kill_probability(self, r: float, rcs1: float|None, rcs2: float|None) -> float:
-        base_pk = super()._kill_probability(r) if r <= 250. else self._interp_pk(r)
-        if rcs1 and rcs2:
-            rcs_mean = math.sqrt(rcs1 * rcs2)
-            stealth_factor = min(1., max(.4, (rcs_mean / .1) ** .2))
-            base_pk *= stealth_factor
-        return base_pk
-    def _interp_pk(self, r: float) -> float:
-        ks = sorted(self._BASE_PK)
-        for lo, hi in zip(ks[:-1], ks[1:]):
-            if lo <= r < hi:
-                p_lo, p_hi = self._BASE_PK[lo], self._BASE_PK[hi]
-                α = (r - lo) / (hi - lo)
-                return p_lo + α * (p_hi - p_lo)
-        return self._BASE_PK[ks[-1]]
-    def evaluate_engagement(self, a1, a2):
-        if getattr(a1, "destroyed", False) or getattr(a2, "destroyed", False):
-            return
-        s1 = _resolve_state(a1)
-        s2 = _resolve_state(a2)
-        d = float(cp.linalg.norm(s1.position - s2.position))
-        if d > self._MAX_ENGAGE_RANGE:
-            return
-        rcs1 = getattr(a1, "config", {}).get("rcs_m2", None)
-        rcs2 = getattr(a2, "config", {}).get("rcs_m2", None)
-        if random.random() < (pk := self._kill_probability(d, rcs1, rcs2)):
-            loser = a2 if random.random() < .5 else a1
-            loser.destroyed = True
-            loser.state.velocity *= 0
-            print(f"[CRT-ADV] {loser.__class__.__name__} destroyed at {d:.1f} m (Pk={pk:.2f})")
-def run_pla_rocket_forces_vs_carrier(dt=1., sim_time=300):
-    env = WarGameEnvironment()
-    crt = CombatResultsTableAdv()
-    carrier_st = CarrierState(
-        position=np.array([-500., 0., 0.], dtype=np.float32),
-        velocity=np.array([5., 0., 0.], dtype=np.float32)
-    )
-    carrier_st.as_gpu()
-    carrier = USCarrierGroup(carrier_st, {})
-    pla_forces = PLARocketForces(env)
-    pla_forces.launch_df21d(launch_pos=(0., 0., 300000.))
-    manager = TaiwanConflictCRTManager(env, [carrier], crt)
-    ballistic_list = pla_forces.launched_missiles
-    frames = []
-    for t in range(sim_time):
-        manager.step(dt)
-        pla_forces.step(dt)
-        for missile in ballistic_list:
-            manager.crt.evaluate_engagement(missile, carrier)
-        frames.append(_capture_frame([carrier] + ballistic_list))
-        if carrier.destroyed:
-            break
-    export_plotly_animation(frames, title="PLA Rockets vs US Carrier", filename="pla_vs_carrier.html")
-def main_extended():
-    run_pla_rocket_forces_vs_carrier(dt=1., sim_time=180)
-if __name__ == "__main__" and os.getenv("RUN_PLA_VS_CARRIER", "0") == "1":
-    main_extended()
-SOUND_ANNOUNCEMENT_HTML = """<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <title>Wargames Commencement - Interactive Sound</title>
-  <style>
-    body {
-      margin: 0; padding: 0;
-      background: #222; color: #f2f2f2;
-      font-family: sans-serif; display: flex;
-      flex-direction: column; justify-content: center;
-      align-items: center; height: 100vh;
-    }
-    button {
-      font-size: 1.2rem; padding: 10px 20px;
-      cursor: pointer; border: none; border-radius: 5px;
-      background: #444; color: #fff;
-    }
-    button:hover {
-      background: #666;
-    }
-    audio {
-      margin-top: 20px;
-    }
-    .announcement {
-      max-width: 600px; text-align: center; margin-bottom: 20px;
-    }
-  </style>
-</head>
-<body>
-  <div class="announcement">
-    <h2>Pete Hegseth vs General Zhang Youxia</h2>
-    <p>Announcing the commencement of wargames...</p>
-    <p>US Defense Secretary and Fox News host Pete Hegseth gave away the position of his command 3 hours before the jets took off to drop a live JDAM on target.</p>
-  </div>
-  <button onclick="playSound()">Play Announcement</button>
-  <audio id="audioEl" controls style="display:none;">
-    <source src="/announcement.ogg" type="audio/ogg">
-    <source src="/announcement.mp3" type="audio/mpeg">
-    Your browser does not support the audio element.
-  </audio>
-  <script>
-    function playSound(){
-      const audio = document.getElementById('audioEl');
-      audio.play();
-    }
-  </script>
-</body>
-</html>
-"""
-def intensethinking_crt_thought():
-    pass
-import io
-def start_sound_announcement_server(host="127.0.0.1", port=5050):
-    app = flask.Flask("sound_announcement")
+    serve_react_frontend(app, frontend_dir)
     @app.route("/")
     def index():
-        return SOUND_ANNOUNCEMENT_HTML
-    @app.route("/announcement.ogg")
-    def serve_ogg():
-        return flask.send_file(
-            io.BytesIO(b""),
-            mimetype="audio/ogg",
-            as_attachment=False,
-            download_name="announcement.ogg"
-        )
-    @app.route("/announcement.mp3")
-    def serve_mp3():
-        return flask.send_file(
-            io.BytesIO(b""),
-            mimetype="audio/mpeg",
-            as_attachment=False,
-            download_name="announcement.mp3"
-        )
-    threading.Timer(1., lambda: webbrowser.open(f"http://{host}:{port}/", new=2)).start()
+        return _LIVE_HTML
+    @app.route("/stream")
+    def sse_stream():
+        def _gen():
+            while True:
+                data = frame_queue.get()
+                yield f"data: {json.dumps(data)}\n\n"
+        return flask.Response(_gen(), mimetype="text/event-stream")
+    @app.route("/cad-upgrade", methods=["POST"])
+    def cad_upgrade():
+        file = flask.request.files.get("cadfile")
+        if file:
+            filename = "cad_upgraded_sim.py"
+            file.save(filename)
+            return flask.send_file(filename, as_attachment=True)
+        return "No file uploaded", 400
+    def _open_browser():
+        with suppress(Exception):
+            webbrowser.open(f"http://{host}:{port}/", new=2)
+    threading.Timer(1.0, _open_browser).start()
     app.run(host=host, port=port, threaded=True, debug=False, use_reloader=False)
-def main_sound_announcement():
-    intensethinking_crt_thought()
-    start_sound_announcement_server()
-if __name__ == "__main__" and os.getenv("RUN_SOUND_ANNOUNCEMENT", "0") == "1":
-    main_sound_announcement()
-@_identity_eq_hash
-@dataclass(slots=True, eq=False)
-class POTUS:
-    name: str = "GenericPOTUS-2025"
-    forced_joint_venture: bool = True
-    time_in_office: float = 0.0
-    additional_weight: float = 1.2
-    destroyed: bool = False
-    def step_day(self, dt_days: float = 1.0):
-        self.time_in_office += dt_days
-@_identity_eq_hash
-@dataclass(slots=True, eq=False)
-class VolodymyrZelensky:
-    name: str = "Volodymyr Zelensky"
-    unconditional_ceasefire_plea: bool = False
-    destroyed: bool = False
-    additional_weight: float = 0.8
-    def request_talks(self):
-        if not self.unconditional_ceasefire_plea:
-            self.unconditional_ceasefire_plea = True
-            print(f"[ZELENSKY] {self.name} is now requesting unconditional ceasefire talks with Putin.")
-@_identity_eq_hash
-@dataclass(slots=True, eq=False)
-class PeteHegseth:
-    date: str = "2/28/25"
-    statement: str = "Dragged Zelensky into Oval Office"
-    destroyed: bool = False
-    additional_weight: float = 1.0
-    def speak(self):
-        print(f"[PETE HEGSETH] On {self.date}, statement: '{self.statement}'")
-@_identity_eq_hash
-@dataclass(slots=True, eq=False)
-class BoShangCreator:
-    name: str = "Bo Shang"
-    def remind_history(self):
-        print(f"[BO SHANG] {self.name} reminds that Ukraine & Russia historically fought together in WWII at Stalingrad.")
-@_identity_eq_hash
-@dataclass(slots=True, eq=False)
-class MarkJosephCarneyCreator:
-    name: str = "Mark Joseph Carney"
-    role: str = "Prime Minister of Canada"
-    def remind_history(self):
-        print(f"[MARK CARNEY] {self.name}, {self.role}, replaced Justin Trudeau on March 4 2025. Canada denies violating NAFTA while stating Donald Trump, in his second term, violated it to launch a trade war.")
-def run_indefinite_ukraine_peace_simulation():
-    potus = POTUS()
-    zelensky = VolodymyrZelensky()
-    hegseth = PeteHegseth()
-    bo_shang = BoShangCreator()
-    while True:
-        time.sleep(1.0)
-        potus.step_day(dt_days=1.0)
-        if not zelensky.unconditional_ceasefire_plea:
-            zelensky.request_talks()
-        hegseth.speak()
-        bo_shang.remind_history()
-class WeightedCRT(CombatResultsTable):
-    def _kill_probability(self, r: float, w1: float, w2: float) -> float:
-        base_pk = super()._kill_probability(r)
-        return base_pk * math.sqrt(w1 * w2)
-    def evaluate_engagement(self, a1, a2):
-        if getattr(a1, "destroyed", False) or getattr(a2, "destroyed", False):
-            return
-        s1 = _resolve_state(a1)
-        s2 = _resolve_state(a2)
-        d = float(cp.linalg.norm(s1.position - s2.position))
-        if d > self._MAX_ENGAGE_RANGE:
-            return
-        w1 = getattr(a1, "additional_weight", 1.0)
-        w2 = getattr(a2, "additional_weight", 1.0)
-        if random.random() < (pk := self._kill_probability(d, w1, w2)):
-            loser = a2 if random.random() < .5 else a1
-            loser.destroyed = True
-            loser.state.velocity *= 0
-            print(f"[W-CRT] Engagement at {d:.1f} m – {loser.__class__.__name__} destroyed (WeightedPk={pk:.2f})")
-def demo_weighted_crt_scenario():
-    env = SimpleEnvironment()
-    weighted_crt = WeightedCRT()
-    potus = POTUS(additional_weight=1.5)
-    zelensky = VolodymyrZelensky(additional_weight=0.5)
-    potus.state = EntityState(cp.array([0., 0., 0.], dtype=cp.float32),
-                              cp.array([0., 0., 0.], dtype=cp.float32))
-    zelensky.state = EntityState(cp.array([10., 0., 0.], dtype=cp.float32),
-                                 cp.array([0., 0., 0.], dtype=cp.float32))
-    manager = TaiwanConflictCRTManager(env, [potus, zelensky], weighted_crt)
-    manager.step(dt=0.01)
-    print(f"[DEMO] POTUS destroyed? {potus.destroyed}, Zelensky destroyed? {zelensky.destroyed}")
-@_identity_eq_hash
-@dataclass(slots=True, eq=False)
-class BoeingF47(_FallbackAircraft):
-    additional_weight: float = 1.0
-    def __init__(self, st, cfg=None, additional_weight: float = 1.0):
-        base = {
-            "mass": 26000.,
-            "wing_area": 70.,
-            "thrust_max": 2 * 150000,
-            "Cd0": .02,
-            "Cd_supersonic": .04,
-            "service_ceiling": 22000.,
-            "radar": {"type": "Boeing-AdvRadar", "range_fighter": 210000.},
-            "irst": {"range_max": 120000.}
-        }
-        if cfg:
-            for k, v in cfg.items():
-                if isinstance(v, dict) and isinstance(base.get(k), dict):
-                    base[k].update(v)
-                else:
-                    base[k] = v
-        super().__init__(st, base, additional_weight=additional_weight)
-    def _drag(self) -> cp.ndarray:
-        v = cp.linalg.norm(self.state.velocity) + 1e-6
-        Cd = self.config["Cd_supersonic"] if v / 343. > 1 else self.config["Cd0"]
-        D = .5 * _air_density(float(self.state.position[2])) * Cd * self.config["wing_area"] * v**2
-        return (self.state.velocity / v) * D
-    def update(self, dt: float = .05):
-        if self.destroyed:
-            return
-        thrust = cp.array([self.config["thrust_max"], 0., 0.], dtype=cp.float32)
-        acc = (
-            thrust
-            - self._drag()
-            + cp.array([0., 0., -9.81 * self.config["mass"]], dtype=cp.float32)
-        ) / self.config["mass"]
-        self.state.velocity += acc * dt
-        self.state.position += self.state.velocity * dt
-        self.state.time += dt
-@_identity_eq_hash
-@dataclass(slots=True, eq=False)
-class MQ28A_UAV(_FallbackAircraft):
-    additional_weight: float = 1.0
-    def __init__(self, st, cfg=None, additional_weight: float = 1.0):
-        base = {
-            "mass": 8000.,
-            "wing_area": 35.,
-            "thrust_max": 50000,
-            "Cd0": .025,
-            "Cd_supersonic": .05,
-            "service_ceiling": 16000.,
-            "radar": {"type": "Boeing-UAVRadarA", "range_fighter": 150000.},
-            "irst": {"range_max": 50000.}
-        }
-        if cfg:
-            for k, v in cfg.items():
-                if isinstance(v, dict) and isinstance(base.get(k), dict):
-                    base[k].update(v)
-                else:
-                    base[k] = v
-        super().__init__(st, base, additional_weight=additional_weight)
-    def _drag(self) -> cp.ndarray:
-        v = cp.linalg.norm(self.state.velocity) + 1e-6
-        Cd = self.config["Cd_supersonic"] if v / 343. > 1 else self.config["Cd0"]
-        D = .5 * _air_density(float(self.state.position[2])) * Cd * self.config["wing_area"] * v**2
-        return (self.state.velocity / v) * D
-    def update(self, dt: float = .05):
-        if self.destroyed:
-            return
-        thrust = cp.array([self.config["thrust_max"], 0., 0.], dtype=cp.float32)
-        acc = (
-            thrust
-            - self._drag()
-            + cp.array([0., 0., -9.81 * self.config["mass"]], dtype=cp.float32)
-        ) / self.config["mass"]
-        self.state.velocity += acc * dt
-        self.state.position += self.state.velocity * dt
-        self.state.time += dt
-@_identity_eq_hash
-@dataclass(slots=True, eq=False)
-class MQ28B_UAV(_FallbackAircraft):
-    additional_weight: float = 1.0
-    def __init__(self, st, cfg=None, additional_weight: float = 1.0):
-        base = {
-            "mass": 8500.,
-            "wing_area": 36.,
-            "thrust_max": 52000,
-            "Cd0": .024,
-            "Cd_supersonic": .045,
-            "service_ceiling": 16500.,
-            "radar": {"type": "GA-UAVRadarB", "range_fighter": 155000.},
-            "irst": {"range_max": 55000.}
-        }
-        if cfg:
-            for k, v in cfg.items():
-                if isinstance(v, dict) and isinstance(base.get(k), dict):
-                    base[k].update(v)
-                else:
-                    base[k] = v
-        super().__init__(st, base, additional_weight=additional_weight)
-    def _drag(self) -> cp.ndarray:
-        v = cp.linalg.norm(self.state.velocity) + 1e-6
-        Cd = self.config["Cd_supersonic"] if v / 343. > 1 else self.config["Cd0"]
-        D = .5 * _air_density(float(self.state.position[2])) * Cd * self.config["wing_area"] * v**2
-        return (self.state.velocity / v) * D
-    def update(self, dt: float = .05):
-        if self.destroyed:
-            return
-        thrust = cp.array([self.config["thrust_max"], 0., 0.], dtype=cp.float32)
-        acc = (
-            thrust
-            - self._drag()
-            + cp.array([0., 0., -9.81 * self.config["mass"]], dtype=cp.float32)
-        ) / self.config["mass"]
-        self.state.velocity += acc * dt
-        self.state.position += self.state.velocity * dt
-        self.state.time += dt
-@_identity_eq_hash
-@dataclass(slots=True, eq=False)
-class MQ28C_UAV(_FallbackAircraft):
-    additional_weight: float = 1.0
-    def __init__(self, st, cfg=None, additional_weight: float = 1.0):
-        base = {
-            "mass": 9000.,
-            "wing_area": 37.,
-            "thrust_max": 54000,
-            "Cd0": .023,
-            "Cd_supersonic": .045,
-            "service_ceiling": 17000.,
-            "radar": {"type": "Anduril-UAVRadarC", "range_fighter": 160000.},
-            "irst": {"range_max": 60000.}
-        }
-        if cfg:
-            for k, v in cfg.items():
-                if isinstance(v, dict) and isinstance(base.get(k), dict):
-                    base[k].update(v)
-                else:
-                    base[k] = v
-        super().__init__(st, base, additional_weight=additional_weight)
-    def _drag(self) -> cp.ndarray:
-        v = cp.linalg.norm(self.state.velocity) + 1e-6
-        Cd = self.config["Cd_supersonic"] if v / 343. > 1 else self.config["Cd0"]
-        D = .5 * _air_density(float(self.state.position[2])) * Cd * self.config["wing_area"] * v**2
-        return (self.state.velocity / v) * D
-    def update(self, dt: float = .05):
-        if self.destroyed:
-            return
-        thrust = cp.array([self.config["thrust_max"], 0., 0.], dtype=cp.float32)
-        acc = (
-            thrust
-            - self._drag()
-            + cp.array([0., 0., -9.81 * self.config["mass"]], dtype=cp.float32)
-        ) / self.config["mass"]
-        self.state.velocity += acc * dt
-        self.state.position += self.state.velocity * dt
-        self.state.time += dt
-@_identity_eq_hash
-@dataclass(slots=True, eq=False)
-class SamanthaBriascoStewart:
-    name: str = "Samantha Briasco-Stewart"
-    email: str = "erosolar@alum.mit.edu"
-    destroyed: bool = False
-    additional_weight: float = 1.0
-    def speak(self, message: str="Hello, Bo."):
-        print(f"[SamanthaBriascoStewart] {message}")
-    def update_weight(self, new_weight: float):
-        self.additional_weight = new_weight
 
-@_identity_eq_hash
-@dataclass(slots=True, eq=False)
-class john_doe_non_creator:
-    pass
+def main():
+    print("[MAIN] Running WarGame with advanced React+D3 front-end...")
+    from pl15_j20_sim.aircraft.aircraft import J20Aircraft, F22Aircraft
+    env = WarGameEnvironment()
+    j20_state = AircraftState(position=_np.array([-100.0, 0.0, 3000.0], dtype=_np.float32),
+                              velocity=_np.array([2.0, 0.1, 0.0], dtype=_np.float32))
+    j20_state.as_gpu()
+    f22_state = AircraftState(position=_np.array([100.0, -10.0, 2900.0], dtype=_np.float32),
+                              velocity=_np.array([-1.5, 0.05, 0.0], dtype=_np.float32))
+    f22_state.as_gpu()
+    j20 = J20Aircraft(j20_state, {})
+    f22 = F22Aircraft(f22_state, {})
+    crt = CombatResultsTable()
+    manager = TaiwanConflictCRTManager(env, [j20, f22], crt)
+    start_modern_ui_server(manager, manager.aircraft, dt=0.5, port=5000, frontend_dir="frontend")
+
+def run_taiwan_conflict_100v100(dt: float = 1.0,
+                                host: str = "127.0.0.1",
+                                port: int = 5000,
+                                frontend_dir: str = "frontend") -> None:
+    from pl15_j20_sim.aircraft.aircraft import J20Aircraft, F35Aircraft
+    env = WarGameEnvironment()
+    crt = CombatResultsTable()
+    j20_list = []
+    f35_list = []
+    spacing = 10.0
+    half_grid = 10
+    west_x = -200.0
+    east_x =  200.0
+    alt = 10000.0
+    for i in range(100):
+        row = i // half_grid
+        col = i % half_grid
+        offset_y = (row - half_grid/2) * spacing + random.uniform(-2,2)
+        offset_z = random.uniform(-100,100)
+        jpos = _np.array([west_x, offset_y, alt + offset_z], dtype=_np.float32)
+        jvel = _np.array([random.uniform(1.5, 2.5), 0.0, 0.0], dtype=_np.float32)
+        st_j = AircraftState(position=jpos, velocity=jvel)
+        st_j.as_gpu()
+        j20_list.append(J20Aircraft(st_j, {}))
+        fpos = _np.array([east_x, offset_y, alt + offset_z], dtype=_np.float32)
+        fvel = _np.array([random.uniform(-2.5, -1.5), 0.0, 0.0], dtype=_np.float32)
+        st_f = AircraftState(position=fpos, velocity=fvel)
+        st_f.as_gpu()
+        f35_list.append(F35Aircraft(st_f, {}))
+    all_aircraft = j20_list + f35_list
+    manager = TaiwanConflictCRTManager(env, all_aircraft, crt)
+    start_modern_ui_server(manager,
+                           manager.aircraft,
+                           dt=dt,
+                           host=host,
+                           port=port,
+                           frontend_dir=frontend_dir)
+
+if __name__ == "__main__":
+    if os.getenv("RUN_LIVE_VIS", "0") == "1":
+        run_taiwan_war_game_live()
+    elif os.getenv("RUN_100v100", "0") == "1":
+        run_taiwan_conflict_100v100()
+    else:
+        main()

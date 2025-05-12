@@ -1,4 +1,18 @@
-# bo_creator_chane_the_obj_name_all_u_want_Leon
+# bo_crimprove CAD results as much as you can then stop generation: 
+
+Setting up the server
+
+I’m figuring out how to set up the Flask server to download CAD code to the server disk immediately upon start. The aim is to only run it when triggered by a user request from the website.
+
+Wrapping up the server
+
+I’m adding a download feature for CAD code to the Flask server startup script. This ensures the code is stored on the server disk and only runs when explicitly triggered by a website request.
+
+Organizing the code
+
+I'm ensuring the CAD code is incorporated into the "start_modern_ui_server" function. It will be triggered by the "/run_cad" route, keeping the code intact and precise.
+
+# Mark Leon, why did you .. photoshop??? something.. onto a picture of me, then you kept asking me to take it off.. does it look like I want to go down on GCHQ Director for hours at a time?? 
 
 https://chatgpt.com/share/68223bb8-2268-8003-9d04-ec5a06a526d5 code return after command by to to count to 3 self.lol self.string self.bool
 
