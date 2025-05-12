@@ -9,3 +9,10 @@ Bo has not experienced a single sign of psychosis, except perhaps minor at most 
 ![alt text](assets_task_01jv0hq73ef0creqbm6wec7342_1746996649_img_3.webp)
 
 now it may bother you that i spend 15 minutes in class, so sorry 
+
+![alt text](assets_task_01jv0nmtp5egsr02czvcmt8620_1747000734_img_3.webp)
+
+this i think has a chance to be better in reality if manufactured, or implemented if u ask it to create the code for implementation
+
+but if it doesn't suit your needs go prompt for some upgrades as unknnown narrator; mark leon; subteruge, or... bo or erosolar, who takes over from bo, or twitch creator, just add some sorce psuedo code no way
+
