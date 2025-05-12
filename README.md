@@ -6,3 +6,6 @@ Now Bo has been victim to a hence unadmitted to human rights conspiracy committe
 
 Bo has not experienced a single sign of psychosis, except perhaps minor at most under biological systems stress, since Tufts 2017, the semester of 15 minute in class checksum taught returned CRT by Bo
 
+![alt text](assets_task_01jv0hq73ef0creqbm6wec7342_1746996649_img_3.webp)
+
+now it may bother you that i spend 15 minutes in class, so sorry 
